@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -52,3 +53,18 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Sandbox / local artifacts (do not publish)
+/scripts/
+/tests/
+/examples/
+/mini-services/
+/db/
+/download/
+/upload/
+/7-sonata-src/
+/.zscripts/
+/.ghdeploy/
+/Caddyfile
+/agent-ctx/
+tsconfig.tsbuildinfo
+next-env.d.ts
