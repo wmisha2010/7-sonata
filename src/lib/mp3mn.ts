@@ -100,7 +100,7 @@ function parseHtml(html: string, coverUrl?: string): Mp3mnTrack[] {
       duration,
     })
   }
-  return tracks.slice(0, 25)
+  return tracks // no cap — the API route merges several mp3mn queries
 }
 
 // Route the CDN stream through our own origin (relative same-origin URL).

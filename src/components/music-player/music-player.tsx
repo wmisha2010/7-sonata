@@ -908,22 +908,30 @@ export function MusicPlayer() {
       if (mnResults.length > 0) {
         const converted = mnResults.map(mp3mnToTrack)
         setSearchResults(converted)
-        void Promise.all(converted.map(async (t) => {
-          if (t.coverImage) return t
-          const enriched = await enrichFromITunes(`${t.artist} ${t.title}`.trim())
-          if (enriched?.coverImage) {
-            setSearchResults((prev) => prev.map((x) => x.id === t.id ? { ...x, coverImage: enriched.coverImage } : x))
-            // Also update playlist copies that were added before enrichment
-            // finished (e.g. user pressed "Add all" immediately). The
-            // self-heal effect will then extract colors for them.
-            setTracks((prev) => {
-              if (!prev.some((x) => x.url === t.url && !x.coverImage)) return prev
-              const next = prev.map((x) => x.url === t.url && !x.coverImage ? { ...x, coverImage: enriched.coverImage! } : x)
-              persistLibrary(next)
-              return next
-            })
+        // Enrich covers from iTunes with a small worker pool — an aggregated
+        // search can return 40-90 tracks and blasting that many parallel
+        // requests at iTunes would trip its rate limiting.
+        const queue = converted.filter((t) => !t.coverImage)
+        let qi = 0
+        const enrichWorker = async () => {
+          while (qi < queue.length) {
+            const t = queue[qi++]
+            const enriched = await enrichFromITunes(`${t.artist} ${t.title}`.trim())
+            if (enriched?.coverImage) {
+              setSearchResults((prev) => prev.map((x) => x.id === t.id ? { ...x, coverImage: enriched.coverImage } : x))
+              // Also update playlist copies that were added before enrichment
+              // finished (e.g. user pressed "Add all" immediately). The
+              // self-heal effect will then extract colors for them.
+              setTracks((prev) => {
+                if (!prev.some((x) => x.url === t.url && !x.coverImage)) return prev
+                const next = prev.map((x) => x.url === t.url && !x.coverImage ? { ...x, coverImage: enriched.coverImage! } : x)
+                persistLibrary(next)
+                return next
+              })
+            }
           }
-        }))
+        }
+        void Promise.all(Array.from({ length: Math.min(6, queue.length) }, enrichWorker))
         return
       }
       setSearchResults([])
