@@ -42,6 +42,7 @@ import { extractAudioMeta } from "@/lib/metadata"
 import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichment"
 import { extractCoverColors } from "@/lib/color-extract"
 import { searchMp3mn, mp3mnToTrack } from "@/lib/mp3mn"
+import { searchDailymotion, dailymotionToTrack, isDailymotionUrl, dailymotionId } from "@/lib/dailymotion"
 import {
   loadLibrary,
   saveLibrary,
@@ -100,9 +101,10 @@ export function MusicPlayer() {
   const [theme, setTheme] = useState<Theme>("dark")
   const [isDragOver, setIsDragOver] = useState(false)
   // ---- Search ----
-  // Two modes: filter the local library, or search MP3mn online and add
-  // the results as streaming tracks.
-  const [searchMode, setSearchMode] = useState<"library" | "online">("library")
+  // Three modes: filter the local library, search MP3mn online for audio
+  // tracks, or search Dailymotion for video clips — both online modes add
+  // streaming tracks to the playlist.
+  const [searchMode, setSearchMode] = useState<"library" | "online" | "video">("library")
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<Track[]>([])
   const [isSearching, setIsSearching] = useState(false)
@@ -113,6 +115,17 @@ export function MusicPlayer() {
   const [previewProgress, setPreviewProgress] = useState(0)
   const [previewDuration, setPreviewDuration] = useState(0)
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
+  // Dailymotion embed player (iframe) — playback is driven via postMessage
+  // commands; state comes back as message events (playing/pause/timeupdate).
+  const dmFrameRef = useRef<HTMLIFrameElement | null>(null)
+  // Set once the embed proves itself alive (any postMessage event received).
+  // If no event ever arrives (player host blocked/unavailable — e.g. region
+  // restrictions), we show a fallback hint instead of a silent black box.
+  const dmGotEventRef = useRef(false)
+  const [dmUnavailable, setDmUnavailable] = useState(false)
+  const dmCommand = useCallback((method: string, value?: number | boolean) => {
+    try { dmFrameRef.current?.contentWindow?.postMessage(value === undefined ? { method } : { method, value }, "*") } catch {}
+  }, [])
   // Collapse the playlist panel (especially useful on mobile / narrow screens
   // so the player gets the full width).
   const [playlistCollapsed, setPlaylistCollapsed] = useState(false)
@@ -263,6 +276,8 @@ export function MusicPlayer() {
   const [previewTrack, setPreviewTrack] = useState<Track | null>(null)
 
   const currentTrack = previewTrack || tracks[currentIndex]
+  // True when the current track is a Dailymotion embed (official iframe player).
+  const isDmTrack = !!currentTrack?.isVideo && isDailymotionUrl(currentTrack.url)
 
   // ---- Theme handling ----
   useEffect(() => {
@@ -393,12 +408,18 @@ export function MusicPlayer() {
     }
   }, [audioKey])
 
-  // Sync volume to BOTH the audio and the video element (whichever is active).
+  // Sync volume to BOTH the audio and the video element (whichever is
+  // active). Dailymotion embeds receive it as postMessage commands.
   useEffect(() => {
     const v = muted ? 0 : volume
+    if (isDmTrack) {
+      dmCommand("setVolume", v)
+      dmCommand("muted", muted)
+      return
+    }
     if (audioRef.current) audioRef.current.volume = v
     if (videoRef.current) videoRef.current.volume = v
-  }, [volume, muted, audioKey])
+  }, [volume, muted, audioKey, isDmTrack, dmCommand])
 
   // Reset playback state + switch to a track (called from event handlers, not effects)
   const selectTrack = useCallback(
@@ -602,6 +623,11 @@ export function MusicPlayer() {
   }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const togglePlay = useCallback(() => {
+    // Dailymotion embeds are controlled via postMessage commands.
+    if (isDmTrack) {
+      dmCommand(isPlaying ? "pause" : "play")
+      return
+    }
     // Video tracks use their own visible <video> element (with controls).
     if (currentTrack?.isVideo) {
       const video = videoRef.current
@@ -620,7 +646,7 @@ export function MusicPlayer() {
     } else {
       audio.pause()
     }
-  }, [currentTrack?.isVideo])
+  }, [currentTrack?.isVideo, isDmTrack, isPlaying, dmCommand])
 
   const handleEnded = useCallback(() => {
     if (repeatMode === "one") {
@@ -666,14 +692,70 @@ export function MusicPlayer() {
     playNext()
   }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo])
 
+  // Dailymotion iframe events (api=1): playback state, progress and end.
+  // The source check guarantees the message comes from OUR embed, not any
+  // other Dailymotion iframe on the page.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as { event?: string; time?: number; duration?: number } | null
+      if (!data || typeof data !== "object" || typeof data.event !== "string") return
+      if (!dmFrameRef.current || e.source !== dmFrameRef.current.contentWindow) return
+      switch (data.event) {
+        case "start":
+        case "playing":
+          dmGotEventRef.current = true
+          setDmUnavailable(false)
+          setIsPlaying(true)
+          setIsLoading(false)
+          if (data.duration && data.duration > 0) setDuration(data.duration)
+          break
+        case "pause":
+          dmGotEventRef.current = true
+          setIsPlaying(false)
+          break
+        case "timeupdate":
+          dmGotEventRef.current = true
+          if (typeof data.time === "number" && Math.abs(data.time - progressRef.current) > 0.25) {
+            progressRef.current = data.time
+            setProgress(data.time)
+          }
+          if (data.duration && data.duration > 0) setDuration(data.duration)
+          break
+        case "video_end":
+          handleEnded()
+          break
+      }
+    }
+    window.addEventListener("message", onMessage)
+    return () => window.removeEventListener("message", onMessage)
+  }, [handleEnded])
+
+  // If the embed never proves itself alive (no events within 8s), assume the
+  // player host is unavailable (region/network block) and surface a helpful
+  // hint instead of a silent black rectangle.
+  useEffect(() => {
+    if (!isDmTrack) { setDmUnavailable(false); return }
+    dmGotEventRef.current = false
+    const t = setTimeout(() => {
+      if (!dmGotEventRef.current) setDmUnavailable(true)
+    }, 8000)
+    return () => clearTimeout(t)
+  }, [isDmTrack, currentTrack?.url])
+
   const seek = useCallback(
     (value: number) => {
+      // Dailymotion embeds are seeked via postMessage.
+      if (isDmTrack) {
+        dmCommand("seek", value)
+        setProgress(value)
+        return
+      }
       const media = currentTrack?.isVideo ? videoRef.current : audioRef.current
       if (!media || !Number.isFinite(media.duration)) return
       media.currentTime = value
       setProgress(value)
     },
-    [currentTrack?.isVideo]
+    [currentTrack?.isVideo, isDmTrack, dmCommand]
   )
 
 
@@ -691,12 +773,24 @@ export function MusicPlayer() {
     const actions = ["play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto"] as const
     const h: Record<string, (d: any) => void> = {
       play: () => {
+        const t = latestRef.current.currentTrack
+        if (t?.isVideo && isDailymotionUrl(t.url)) {
+          dmCommand("play")
+          mediaSessionApi.setPlaybackState("playing")
+          return
+        }
         const el = getActiveMedia()
         if (el) {
           el.play().then(() => mediaSessionApi.setPlaybackState("playing")).catch(() => mediaSessionApi.setPlaybackState("paused"))
         } else mediaSessionApi.setPlaybackState("playing")
       },
       pause: () => {
+        const t = latestRef.current.currentTrack
+        if (t?.isVideo && isDailymotionUrl(t.url)) {
+          dmCommand("pause")
+          mediaSessionApi.setPlaybackState("paused")
+          return
+        }
         const el = getActiveMedia()
         if (el) {
           el.pause()
@@ -964,6 +1058,18 @@ export function MusicPlayer() {
     } catch { setSearchResults([]) } finally { setIsSearching(false) }
   }, [searchQuery, persistLibrary])
 
+  // Video mode: query Dailymotion for clips. Covers come from the search
+  // response itself — no iTunes enrichment needed.
+  const runVideoSearch = useCallback(async () => {
+    const q = searchQuery.trim()
+    if (!q) { setSearchResults([]); return }
+    setIsSearching(true)
+    try {
+      const vids = await searchDailymotion(q)
+      setSearchResults(vids.map(dailymotionToTrack))
+    } catch { setSearchResults([]) } finally { setIsSearching(false) }
+  }, [searchQuery])
+
   // Play a track from search results WITHOUT adding it to the playlist.
   // Sets it as the previewTrack so the main player displays it and the
   // visualizer reacts. Plays through the main audioRef.
@@ -971,6 +1077,11 @@ export function MusicPlayer() {
     (track: Track) => {
       // If same track is already the previewTrack → toggle play/pause
       if (previewTrack && previewTrack.url === track.url) {
+        // Dailymotion embeds are toggled via postMessage.
+        if (isDailymotionUrl(track.url)) {
+          dmCommand(isPlaying ? "pause" : "play")
+          return
+        }
         const audio = audioRef.current
         if (audio) {
           if (audio.paused) audio.play().catch(() => {})
@@ -999,7 +1110,7 @@ export function MusicPlayer() {
         })
       }
     },
-    [previewTrack]
+    [previewTrack, isPlaying, dmCommand]
   )
 
   // Helper: check if a track is already in the playlist by title+artist
@@ -1629,6 +1740,45 @@ export function MusicPlayer() {
                    on the right resizes the section (and the playlist shrinks). */
                 <div className="flex w-full shrink-0 items-stretch">
                   <div className="relative min-w-0 flex-1 overflow-hidden bg-black shadow-2xl sm:rounded-2xl sm:shadow-2xl">
+                    {isDmTrack ? (
+                      /* Dailymotion embed — official player iframe, driven
+                         via the postMessage API (api=1). Autoplay is safe:
+                         the iframe only mounts after an explicit click. */
+                      <div
+                        className="relative mx-auto w-full max-w-full"
+                        style={{ aspectRatio: "16 / 9", maxHeight: "60vh" }}
+                      >
+                        <iframe
+                          ref={dmFrameRef}
+                          key={currentTrack.id}
+                          src={`https://www.dailymotion.com/embed/video/${dailymotionId(currentTrack.url)}?api=1&autoplay=1&controls=1`}
+                          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                          allowFullScreen
+                          className="absolute inset-0 h-full w-full border-0"
+                          title={currentTrack.title}
+                          onLoad={() => {
+                            setIsLoading(false)
+                            dmCommand("setVolume", muted ? 0 : volume)
+                          }}
+                        />
+                        {dmUnavailable && (
+                          <div className="absolute inset-0 z-10 grid place-items-center bg-black/85 p-4 text-center">
+                            <div className="max-w-xs">
+                              <p className="text-sm font-medium text-white">Плеер Dailymotion не загрузился</p>
+                              <p className="mt-1 text-xs text-white/70">Возможно, сервис недоступен в вашей сети или регионе.</p>
+                              <a
+                                href={`https://www.dailymotion.com/video/${dailymotionId(currentTrack.url)}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-3 inline-block rounded-md bg-violet-500 dark:bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-600 dark:hover:bg-emerald-600"
+                              >
+                                Открыть на Dailymotion ↗
+                              </a>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
                     <video
                       ref={videoRef}
                       src={currentTrack.url}
@@ -1660,6 +1810,7 @@ export function MusicPlayer() {
                       onPause={() => setIsPlaying(false)}
                       onEnded={handleEnded}
                     />
+                    )}
                   </div>
                   {/* Vertical resize handle — hidden on mobile (no room),
                       shown on sm+ so desktop users can drag to resize. */}
@@ -1957,6 +2108,17 @@ export function MusicPlayer() {
                 >
                   Онлайн (MP3mn)
                 </button>
+                <button
+                  onClick={() => setSearchMode("video")}
+                  className={cn(
+                    "flex-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
+                    searchMode === "video"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  Видео
+                </button>
               </div>
               <div className="flex gap-2">
                 <div className="relative flex-1">
@@ -1969,12 +2131,17 @@ export function MusicPlayer() {
                       if (e.key === "Enter" && searchMode === "online") {
                         e.preventDefault()
                         void runOnlineSearch()
+                      } else if (e.key === "Enter" && searchMode === "video") {
+                        e.preventDefault()
+                        void runVideoSearch()
                       }
                     }}
                     placeholder={
                       searchMode === "library"
                         ? "Фильтр по названию…"
-                        : "Введите песню/исполнителя и Enter…"
+                        : searchMode === "video"
+                          ? "Введите название клипа и Enter…"
+                          : "Введите песню/исполнителя и Enter…"
                     }
                     className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-violet-400 dark:focus:border-emerald-400 focus:outline-none"
                   />
@@ -1992,9 +2159,9 @@ export function MusicPlayer() {
                     </button>
                   )}
                 </div>
-                {searchMode === "online" && (
+                {searchMode !== "library" && (
                   <button
-                    onClick={() => void runOnlineSearch()}
+                    onClick={() => void (searchMode === "video" ? runVideoSearch() : runOnlineSearch())}
                     disabled={isSearching || !searchQuery.trim()}
                     className="shrink-0 rounded-md bg-violet-500 dark:bg-emerald-500 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-violet-600 dark:hover:bg-emerald-600 disabled:opacity-40"
                   >
@@ -2008,7 +2175,7 @@ export function MusicPlayer() {
               </div>
             </div>
             <div className="custom-scroll flex-1 overflow-y-auto overflow-x-hidden" style={{maxHeight: "calc(100vh - 360px)"}}>
-              {searchMode === "online" ? (
+              {searchMode !== "library" ? (
                 <ul className="divide-y divide-border">
                   {searchResults.map((track) => {
                     const isInPlaylist = trackExists(track, tracks)
