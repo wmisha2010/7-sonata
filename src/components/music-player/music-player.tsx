@@ -41,7 +41,6 @@ import { type Track } from "@/lib/tracks"
 import { extractAudioMeta } from "@/lib/metadata"
 import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichment"
 import { extractCoverColors } from "@/lib/color-extract"
-import { searchAudius, audiusToTrack } from "@/lib/audius"
 import { searchMp3mn, mp3mnToTrack } from "@/lib/mp3mn"
 import {
   loadLibrary,
@@ -101,7 +100,7 @@ export function MusicPlayer() {
   const [theme, setTheme] = useState<Theme>("dark")
   const [isDragOver, setIsDragOver] = useState(false)
   // ---- Search ----
-  // Two modes: filter the local library, or search Audius online and add
+  // Two modes: filter the local library, or search MP3mn online and add
   // the results as streaming tracks.
   const [searchMode, setSearchMode] = useState<"library" | "online">("library")
   const [searchQuery, setSearchQuery] = useState("")
@@ -321,7 +320,7 @@ export function MusicPlayer() {
         const restored: Track[] = []
         for (const s of saved) {
           if (s.isStream) {
-            // Streaming tracks (Audius): keep their permanent remote URL.
+            // Streaming tracks (MP3mn): keep their permanent remote URL.
             restored.push({ ...s, hasAudioBlob: undefined } as Track)
           } else {
             // Local uploaded tracks: rebuild the blob URL from stored bytes.
@@ -422,6 +421,49 @@ export function MusicPlayer() {
   // Flag to force-play the next track change. Set when the user explicitly
   // clicks a track in the playlist or from search — NOT on initial load.
   const shouldAutoPlayRef = useRef(false)
+
+  // ---- Search ----
+  // Library mode: filter the existing playlist by the query string.
+  const filteredTracks = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (searchMode !== "library" || !q) return tracks
+    return tracks.filter(
+      (t) =>
+        t.title.toLowerCase().includes(q) ||
+        t.artist.toLowerCase().includes(q) ||
+        (t.album || "").toLowerCase().includes(q)
+    )
+  }, [tracks, searchQuery, searchMode])
+
+  // Sorted tracks for display — applies the user-selected sort mode.
+  // NOTE: declared BEFORE playNext/playPrev/handleEnded — their deps arrays
+  // reference sortedTracks, so it must exist by that point in the render.
+  const sortedTracks = useMemo(() => {
+    const base = searchMode === "library" && searchQuery.trim() ? filteredTracks : tracks
+    if (sortMode === "default") return base
+    const sorted = [...base]
+    const dir = sortAsc ? 1 : -1
+    switch (sortMode) {
+      case "title":
+        sorted.sort((a, b) => a.title.localeCompare(b.title, "ru") * dir)
+        break
+      case "artist":
+        sorted.sort((a, b) => a.artist.localeCompare(b.artist, "ru") * dir)
+        break
+      case "duration":
+        sorted.sort((a, b) => (a.duration - b.duration) * dir)
+        break
+      case "date":
+        // Date added = index in original tracks array (higher = newer)
+        sorted.sort((a, b) => {
+          const ia = tracks.indexOf(a)
+          const ib = tracks.indexOf(b)
+          return (ia - ib) * dir
+        })
+        break
+    }
+    return sorted
+  }, [tracks, filteredTracks, sortMode, sortAsc, searchMode, searchQuery])
 
   // When the playing track changes, stop the OTHER media element so audio
   // and video never play simultaneously, then LOAD the active one.
@@ -525,9 +567,19 @@ export function MusicPlayer() {
       selectTrack(next)
       return
     }
+    // Advance in the DISPLAYED (sorted/filtered) order — with sorting active
+    // the storage order of `tracks` differs from what the user sees, so
+    // storage index+1 would jump to a seemingly random row.
+    const order = sortedTracks
+    if (order.length === 0) return
+    const curId = tracks[currentIndex]?.id
+    const pos = curId ? order.findIndex((t) => t.id === curId) : -1
+    const nextPos = (pos === -1 ? 0 : pos + 1) % order.length
+    const realIdx = tracks.findIndex((t) => t.id === order[nextPos].id)
+    if (realIdx === -1) return
     shouldAutoPlayRef.current = true
-    selectTrack((currentIndex + 1) % tracks.length)
-  }, [shuffle, currentIndex, tracks.length, selectTrack])
+    selectTrack(realIdx)
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const playPrev = useCallback(() => {
     if (tracks.length === 0) return
@@ -537,9 +589,17 @@ export function MusicPlayer() {
       selectTrack(prev)
       return
     }
+    // Same as playNext — follow the displayed (sorted/filtered) order.
+    const order = sortedTracks
+    if (order.length === 0) return
+    const curId = tracks[currentIndex]?.id
+    const pos = curId ? order.findIndex((t) => t.id === curId) : -1
+    const prevPos = (pos === -1 ? 0 : pos - 1 + order.length) % order.length
+    const realIdx = tracks.findIndex((t) => t.id === order[prevPos].id)
+    if (realIdx === -1) return
     shouldAutoPlayRef.current = true
-    selectTrack((currentIndex - 1 + tracks.length) % tracks.length)
-  }, [shuffle, currentIndex, tracks.length, selectTrack])
+    selectTrack(realIdx)
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const togglePlay = useCallback(() => {
     // Video tracks use their own visible <video> element (with controls).
@@ -579,7 +639,14 @@ export function MusicPlayer() {
       }
       return
     }
-    if (!shuffle && repeatMode === "off" && currentIndex === tracks.length - 1) {
+    // Stop only when the current track is the LAST one in the DISPLAYED
+    // (sorted/filtered) order — not in storage order.
+    const order = sortedTracks
+    const curId = currentTrack?.id
+    const isLastInView =
+      order.length === 0 ||
+      (curId !== undefined && order.findIndex((t) => t.id === curId) === order.length - 1)
+    if (!shuffle && repeatMode === "off" && isLastInView) {
       setIsPlaying(false)
       if (currentTrack?.isVideo) {
         const video = videoRef.current
@@ -597,7 +664,7 @@ export function MusicPlayer() {
       return
     }
     playNext()
-  }, [repeatMode, shuffle, currentIndex, tracks.length, playNext, currentTrack?.isVideo])
+  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo])
 
   const seek = useCallback(
     (value: number) => {
@@ -665,7 +732,7 @@ export function MusicPlayer() {
   const folderInputRef = useRef<HTMLInputElement | null>(null)
   // Persist the current uploaded tracks (excluding demos) to IndexedDB.
   const persistLibrary = useCallback((allTracks: Track[]) => {
-    // Persist both local uploaded tracks AND streaming tracks (Audius).
+    // Persist both local uploaded tracks AND streaming tracks (MP3mn).
     //   - Local (up-*, not stream): audio bytes are stored separately in
     //     IndexedDB, so we blank the URL here and rebuild it on load.
     //   - Streaming (isStream): the URL is a permanent remote stream URL, so
@@ -826,47 +893,6 @@ export function MusicPlayer() {
     },
     [tracks, currentIndex, persistLibrary]
   )
-
-  // ---- Search ----
-  // Library mode: filter the existing playlist by the query string.
-  const filteredTracks = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase()
-    if (searchMode !== "library" || !q) return tracks
-    return tracks.filter(
-      (t) =>
-        t.title.toLowerCase().includes(q) ||
-        t.artist.toLowerCase().includes(q) ||
-        (t.album || "").toLowerCase().includes(q)
-    )
-  }, [tracks, searchQuery, searchMode])
-
-  // Sorted tracks for display — applies the user-selected sort mode.
-  const sortedTracks = useMemo(() => {
-    const base = searchMode === "library" && searchQuery.trim() ? filteredTracks : tracks
-    if (sortMode === "default") return base
-    const sorted = [...base]
-    const dir = sortAsc ? 1 : -1
-    switch (sortMode) {
-      case "title":
-        sorted.sort((a, b) => a.title.localeCompare(b.title, "ru") * dir)
-        break
-      case "artist":
-        sorted.sort((a, b) => a.artist.localeCompare(b.artist, "ru") * dir)
-        break
-      case "duration":
-        sorted.sort((a, b) => (a.duration - b.duration) * dir)
-        break
-      case "date":
-        // Date added = index in original tracks array (higher = newer)
-        sorted.sort((a, b) => {
-          const ia = tracks.indexOf(a)
-          const ib = tracks.indexOf(b)
-          return (ia - ib) * dir
-        })
-        break
-    }
-    return sorted
-  }, [tracks, filteredTracks, sortMode, sortAsc, searchMode, searchQuery])
 
   // Self-heal: ensure every playlist track that HAS a cover image also has
   // real cover colors. Catches tracks added via "Add all" (before extraction
@@ -1904,7 +1930,7 @@ export function MusicPlayer() {
               </div>
             </div>
             {/* Search bar — two modes: filter the local library, or search
-                Audius online and add streaming tracks to the playlist. */}
+                MP3mn online and add streaming tracks to the playlist. */}
             <div className="border-b border-border p-3">
               <div className="mb-2 flex gap-1 rounded-lg bg-secondary p-0.5">
                 <button
