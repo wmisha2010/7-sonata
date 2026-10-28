@@ -43,6 +43,7 @@ import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichmen
 import { extractCoverColors } from "@/lib/color-extract"
 import { searchMp3mn, mp3mnToTrack } from "@/lib/mp3mn"
 import { searchRutube, rutubeToTrack, isRutubeUrl, rutubeId } from "@/lib/rutube"
+import Hls from "hls.js"
 import {
   loadLibrary,
   saveLibrary,
@@ -177,6 +178,8 @@ export function MusicPlayer() {
   // Normalizer (compressor) — evens out loudness between tracks so one
   // isn't much quieter/louder than another.
   const normalizerRef = useRef<DynamicsCompressorNode | null>(null)
+  // hls.js instance for native Rutube HLS playback (see rtUseEmbed below).
+  const hlsRef = useRef<Hls | null>(null)
 
   const ensureAudioGraph = useCallback(
     (forVideo: boolean) => {
@@ -286,8 +289,22 @@ export function MusicPlayer() {
   const [previewTrack, setPreviewTrack] = useState<Track | null>(null)
 
   const currentTrack = previewTrack || tracks[currentIndex]
-  // True when the current track is a Rutube embed (official iframe player).
+  // True when the current track is a Rutube video.
   const isRtTrack = !!currentTrack?.isVideo && isRutubeUrl(currentTrack.url)
+  // Video playback mode for Rutube tracks. Default is native HLS: hls.js
+  // feeds the <video> element through OUR /api/video-stream proxy (same-origin
+  // MSE), so Web Audio can capture the element and the spectrum visualizer
+  // gets REAL data — exactly like music tracks. If HLS fails for a given
+  // video (DRM, ACL, region…) we fall back to the official iframe embed,
+  // whose audio is untappable (visualizer runs its animated wave there).
+  const [rtUseEmbed, setRtUseEmbed] = useState(false)
+  const isRtEmbed = isRtTrack && rtUseEmbed
+  const isRtHls = isRtTrack && !rtUseEmbed
+  // Reset the fallback when switching to another video — every track gets
+  // a fresh HLS attempt.
+  useEffect(() => {
+    setRtUseEmbed(false)
+  }, [currentTrack?.id])
 
   // ---- Theme handling ----
   useEffect(() => {
@@ -425,13 +442,13 @@ export function MusicPlayer() {
   // active). The Rutube embed receives it as a best-effort postMessage.
   useEffect(() => {
     const v = muted ? 0 : volume
-    if (isRtTrack) {
+    if (isRtEmbed) {
       rtCommand("volume", v)
       return
     }
     if (audioRef.current) audioRef.current.volume = v
     if (videoRef.current) videoRef.current.volume = v
-  }, [volume, muted, audioKey, isRtTrack, rtCommand])
+  }, [volume, muted, audioKey, isRtEmbed, rtCommand])
 
   // Reset playback state + switch to a track (called from event handlers, not effects)
   const selectTrack = useCallback(
@@ -515,6 +532,9 @@ export function MusicPlayer() {
       audio.currentTime = 0
     }
     if (currentTrack.isVideo) {
+      // Native Rutube HLS mode: the dedicated hls.js effect below owns the
+      // element (graph attach, autoplay, error fallback) — don't fight it here.
+      if (isRtHls) return
       const video = videoRef.current
       if (video) {
         video.volume = muted ? 0 : volume
@@ -557,7 +577,78 @@ export function MusicPlayer() {
       const p = audio.play()
       if (p) p.then(() => setIsPlaying(true)).catch(() => {})
     }
-  }, [currentIndex, currentTrack?.url, currentTrack?.isVideo])
+  }, [currentIndex, currentTrack?.url, currentTrack?.isVideo, isRtHls])
+
+  // Native Rutube HLS playback — the heart of the "visualizer for video"
+  // fix. hls.js pulls the manifest/segments through /api/video-stream (our
+  // origin) and feeds the <video> via MSE (blob:). Same-origin media can be
+  // captured by Web Audio, so ensureAudioGraph(true) gives the analyser REAL
+  // samples and the VFD spectrum dances to the video like it does for music.
+  // Any fatal error → fall back to the official iframe embed.
+  useEffect(() => {
+    if (!isRtHls || !currentTrack?.url) return
+    const video = videoRef.current
+    if (!video) return
+    const vid = rutubeId(currentTrack.url)
+    if (!vid) return
+    let cancelled = false
+    const src = `/api/video-stream?id=${encodeURIComponent(vid)}`
+
+    const startPlay = () => {
+      if (cancelled) return
+      // Attach the Web Audio graph (desktop only — mobile skips it to save
+      // CPU, same trade-off as local videos; the visualizer is hidden there).
+      if (typeof window === "undefined" || window.innerWidth >= 640) {
+        ensureAudioGraph(true)
+      }
+      if (audioCtxRef.current?.state === "suspended") {
+        audioCtxRef.current.resume().catch(() => {})
+      }
+      if (shouldAutoPlayRef.current) {
+        shouldAutoPlayRef.current = false
+        const p = video.play()
+        if (p) p.then(() => setIsPlaying(true)).catch(() => {})
+      }
+    }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, maxBufferLength: 30 })
+      hlsRef.current = hls
+      hls.loadSource(src)
+      hls.attachMedia(video)
+      hls.on(Hls.Events.MANIFEST_PARSED, () => startPlay())
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (cancelled || !data.fatal) return
+        // Manifest/segment/network failure — the official embed usually
+        // still plays such videos (it handles DRM/ACL itself).
+        setRtUseEmbed(true)
+      })
+      return () => {
+        cancelled = true
+        hls.destroy()
+        if (hlsRef.current === hls) hlsRef.current = null
+      }
+    }
+
+    // Safari / iOS: native HLS support — give the element the proxied
+    // manifest directly.
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = src
+      const onMeta = () => startPlay()
+      const onErr = () => setRtUseEmbed(true)
+      video.addEventListener("loadedmetadata", onMeta)
+      video.addEventListener("error", onErr)
+      return () => {
+        cancelled = true
+        video.removeEventListener("loadedmetadata", onMeta)
+        video.removeEventListener("error", onErr)
+        video.removeAttribute("src")
+      }
+    }
+
+    // No MSE and no native HLS → straight to the official embed.
+    setRtUseEmbed(true)
+  }, [isRtHls, currentTrack?.id, currentTrack?.url, ensureAudioGraph])
 
   const playIndex = useCallback(
     (index: number) => {
@@ -635,8 +726,9 @@ export function MusicPlayer() {
   }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const togglePlay = useCallback(() => {
-    // Rutube embeds are controlled via postMessage commands.
-    if (isRtTrack) {
+    // Rutube embeds are controlled via postMessage commands; native HLS
+    // falls through to the regular <video> element below.
+    if (isRtEmbed) {
       rtCommand(isPlaying ? "pause" : "play")
       return
     }
@@ -658,13 +750,14 @@ export function MusicPlayer() {
     } else {
       audio.pause()
     }
-  }, [currentTrack?.isVideo, isRtTrack, isPlaying, rtCommand])
+  }, [currentTrack?.isVideo, isRtEmbed, isPlaying, rtCommand])
 
   const handleEnded = useCallback(() => {
     if (repeatMode === "one") {
       if (currentTrack?.isVideo) {
-        // Rutube embeds restart via the play command (no media element).
-        if (currentTrack.url && isRutubeUrl(currentTrack.url)) {
+        // Rutube embeds restart via the play command (no media element);
+        // native HLS restarts the <video> like any other video.
+        if (isRtEmbed) {
           rtCommand("play")
           return
         }
@@ -707,7 +800,7 @@ export function MusicPlayer() {
       return
     }
     playNext()
-  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo, rtCommand])
+  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo, isRtEmbed, rtCommand])
 
   // Rutube iframe events: the embed posts JSON STRINGS {type,data} with
   // origin https://rutube.ru (verified against the live player). The source
@@ -787,20 +880,20 @@ export function MusicPlayer() {
   // player host is unavailable (region/network block) and surface a helpful
   // hint instead of a silent black rectangle.
   useEffect(() => {
-    if (!isRtTrack) { setRtUnavailable(false); return }
+    if (!isRtEmbed) { setRtUnavailable(false); return }
     rtGotEventRef.current = false
     const t = setTimeout(() => {
       if (!rtGotEventRef.current) setRtUnavailable(true)
     }, 8000)
     return () => clearTimeout(t)
-  }, [isRtTrack, currentTrack?.url])
+  }, [isRtEmbed, currentTrack?.url])
 
   const seek = useCallback(
     (value: number) => {
       // The Rutube embed doesn't accept seek commands (verified against the
       // live player) — its own controls handle seeking; our slider just
-      // reflects the position.
-      if (isRtTrack) {
+      // reflects the position. Native HLS seeks the <video> like normal.
+      if (isRtEmbed) {
         setProgress(value)
         return
       }
@@ -809,7 +902,7 @@ export function MusicPlayer() {
       media.currentTime = value
       setProgress(value)
     },
-    [currentTrack?.isVideo, isRtTrack]
+    [currentTrack?.isVideo, isRtEmbed]
   )
 
 
@@ -828,7 +921,7 @@ export function MusicPlayer() {
     const h: Record<string, (d: any) => void> = {
       play: () => {
         const t = latestRef.current.currentTrack
-        if (t?.isVideo && isRutubeUrl(t.url)) {
+        if (t?.isVideo && isRutubeUrl(t.url) && rtUseEmbed) {
           rtCommand("play")
           mediaSessionApi.setPlaybackState("playing")
           return
@@ -840,7 +933,7 @@ export function MusicPlayer() {
       },
       pause: () => {
         const t = latestRef.current.currentTrack
-        if (t?.isVideo && isRutubeUrl(t.url)) {
+        if (t?.isVideo && isRutubeUrl(t.url) && rtUseEmbed) {
           rtCommand("pause")
           mediaSessionApi.setPlaybackState("paused")
           return
@@ -858,7 +951,7 @@ export function MusicPlayer() {
       seekto: (d: any) => { if (d?.seekTime != null) latestRef.current.seek(d.seekTime) },
     }
     for (const a of actions) mediaSessionApi.setActionHandler(a, h[a])
-  }, [getActiveMedia])
+  }, [getActiveMedia, rtUseEmbed])
   useEffect(() => { updateMediaSession() }, [updateMediaSession])
   useEffect(() => { mediaSessionApi.setPlaybackState(isPlaying ? "playing" : "paused") }, [isPlaying, currentTrack?.url])
   useEffect(() => { if (!currentTrack?.url) return; mediaSessionApi.setMetadata({ title: currentTrack.title, artist: currentTrack.artist, album: currentTrack.album || "7-Sonata", artwork: currentTrack.coverImage ? [{ src: currentTrack.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: currentTrack.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }); if (isPlaying) mediaSessionApi.setPlaybackState("playing") }, [currentTrack?.url])
@@ -1131,9 +1224,17 @@ export function MusicPlayer() {
     (track: Track) => {
       // If same track is already the previewTrack → toggle play/pause
       if (previewTrack && previewTrack.url === track.url) {
-        // Rutube embeds are toggled via postMessage.
-        if (isRutubeUrl(track.url)) {
+        // Rutube embed toggles via postMessage; native HLS via the element.
+        if (track.isVideo && isRutubeUrl(track.url) && rtUseEmbed) {
           rtCommand(isPlaying ? "pause" : "play")
+          return
+        }
+        if (track.isVideo) {
+          const video = videoRef.current
+          if (video) {
+            if (video.paused) video.play().catch(() => {})
+            else video.pause()
+          }
           return
         }
         const audio = audioRef.current
@@ -1164,7 +1265,7 @@ export function MusicPlayer() {
         })
       }
     },
-    [previewTrack, isPlaying, rtCommand]
+    [previewTrack, isPlaying, rtCommand, rtUseEmbed]
   )
 
   // Helper: check if a track is already in the playlist by title+artist
@@ -1794,10 +1895,11 @@ export function MusicPlayer() {
                    on the right resizes the section (and the playlist shrinks). */
                 <div className="flex w-full shrink-0 items-stretch">
                   <div className="relative min-w-0 flex-1 overflow-hidden bg-black shadow-2xl sm:rounded-2xl sm:shadow-2xl">
-                    {isRtTrack ? (
+                    {isRtEmbed ? (
                       /* Rutube embed — official player iframe, driven via the
-                         postMessage protocol. Autoplay is safe: the iframe
-                         only mounts after an explicit click. */
+                         postMessage protocol. Only used as the fallback when
+                         native HLS (and its working visualizer) can't play
+                         this video; audio here is untappable by Web Audio. */
                       <div
                         className="relative mx-auto w-full max-w-full"
                         style={{ aspectRatio: "16 / 9", maxHeight: "60vh" }}
@@ -1835,7 +1937,7 @@ export function MusicPlayer() {
                     ) : (
                     <video
                       ref={videoRef}
-                      src={currentTrack.url}
+                      src={isRtTrack ? undefined : currentTrack.url}
                       preload="auto"
                       // Mobile: fixed-height horizontal container (35vh).
                       // object-contain keeps the video's aspect ratio — vertical
