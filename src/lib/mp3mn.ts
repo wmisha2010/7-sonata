@@ -103,6 +103,16 @@ function parseHtml(html: string, coverUrl?: string): Mp3mnTrack[] {
   return tracks.slice(0, 25)
 }
 
+// Route the CDN stream through our own origin (relative same-origin URL).
+// Same-origin media can be safely captured by the Web Audio graph — no
+// CORS-taint silence — so online tracks get the REAL spectrum visualizer
+// and keep their sound. Desktop (Electron) uses its own IPC bridge and has
+// no /api routes, so it keeps the direct URL.
+function proxiedStreamUrl(streamUrl: string): string {
+  if (typeof window !== "undefined" && (window as any).sonata?.isDesktop) return streamUrl
+  return `/api/audio-proxy?url=${encodeURIComponent(streamUrl)}`
+}
+
 // Convert an mp3mn search result into the app's Track shape.
 export function mp3mnToTrack(a: Mp3mnTrack): Track {
   return {
@@ -111,7 +121,7 @@ export function mp3mnToTrack(a: Mp3mnTrack): Track {
     artist: a.artist,
     album: "MP3mn",
     duration: a.duration,
-    url: a.streamUrl,
+    url: proxiedStreamUrl(a.streamUrl),
     coverImage: a.artworkUrl,
     cover: { from: "#f59e0b", to: "#ef4444" },
     isStream: true,
