@@ -68,3 +68,14 @@ server.log
 /agent-ctx/
 tsconfig.tsbuildinfo
 next-env.d.ts
+/.android-sdk/
+/desktop/extra/
+
+# Build outputs (local artifacts, published as releases instead)
+/desktop/dist/
+/desktop/release/
+/mobile/dist/
+/mobile/android/.gradle/
+/mobile/android/app/build/
+/mobile/android/build/
+/mobile/android/capacitor-cordova-android-plugins/build/

@@ -4,6 +4,9 @@ buildscript {
     
     repositories {
         google()
+        // Google-hosted mirror of Maven Central — avoids repo.maven.apache.org
+        // rate limiting (HTTP 429) on shared IPs.
+        maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
         mavenCentral()
     }
     dependencies {
@@ -20,6 +23,9 @@ apply from: "variables.gradle"
 allprojects {
     repositories {
         google()
+        // Google-hosted mirror of Maven Central — avoids repo.maven.apache.org
+        // rate limiting (HTTP 429) on shared IPs.
+        maven { url "https://maven-central.storage-download.googleapis.com/maven2/" }
         mavenCentral()
     }
 }

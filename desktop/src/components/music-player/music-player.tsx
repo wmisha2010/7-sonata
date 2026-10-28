@@ -41,8 +41,9 @@ import { type Track } from "@/lib/tracks"
 import { extractAudioMeta } from "@/lib/metadata"
 import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichment"
 import { extractCoverColors } from "@/lib/color-extract"
-import { searchAudius, audiusToTrack } from "@/lib/audius"
 import { searchMp3mn, mp3mnToTrack } from "@/lib/mp3mn"
+import { searchRutube, rutubeToTrack, isRutubeUrl, rutubeId, resolveRutubeMasterUrl } from "@/lib/rutube"
+import Hls from "hls.js"
 import {
   loadLibrary,
   saveLibrary,
@@ -101,9 +102,10 @@ export function MusicPlayer() {
   const [theme, setTheme] = useState<Theme>("dark")
   const [isDragOver, setIsDragOver] = useState(false)
   // ---- Search ----
-  // Two modes: filter the local library, or search Audius online and add
-  // the results as streaming tracks.
-  const [searchMode, setSearchMode] = useState<"library" | "online">("library")
+  // Three modes: filter the local library, search MP3mn online for audio
+  // tracks, or search Rutube for video clips — both online modes add
+  // streaming tracks to the playlist.
+  const [searchMode, setSearchMode] = useState<"library" | "online" | "video">("library")
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<Track[]>([])
   const [isSearching, setIsSearching] = useState(false)
@@ -114,6 +116,27 @@ export function MusicPlayer() {
   const [previewProgress, setPreviewProgress] = useState(0)
   const [previewDuration, setPreviewDuration] = useState(0)
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
+  // Rutube embed player (iframe) — playback is driven via the postMessage
+  // protocol: commands are JSON strings {type:"player:play"|"player:pause"},
+  // events come back as JSON strings {type:"player:...",data:{...}}.
+  const rtFrameRef = useRef<HTMLIFrameElement | null>(null)
+  // Set once the embed proves itself alive (any postMessage event received).
+  // If no event ever arrives (player host blocked/unavailable), we show a
+  // fallback hint instead of a silent black box.
+  const rtGotEventRef = useRef(false)
+  const [rtUnavailable, setRtUnavailable] = useState(false)
+  // Verified against the live embed: play/pause work; seek is NOT supported
+  // by the embed (its own controls handle it); volume is sent best-effort.
+  const rtCommand = useCallback((method: "play" | "pause" | "volume", value?: number | boolean) => {
+    const win = rtFrameRef.current?.contentWindow
+    if (!win) return
+    let payload: string | null = null
+    if (method === "play") payload = JSON.stringify({ type: "player:play" })
+    else if (method === "pause") payload = JSON.stringify({ type: "player:pause" })
+    else if (method === "volume" && typeof value === "number") payload = JSON.stringify({ type: "player:volume", data: { volume: value } })
+    if (!payload) return
+    try { win.postMessage(payload, "*") } catch {}
+  }, [])
   // Collapse the playlist panel (especially useful on mobile / narrow screens
   // so the player gets the full width).
   const [playlistCollapsed, setPlaylistCollapsed] = useState(false)
@@ -155,6 +178,8 @@ export function MusicPlayer() {
   // Normalizer (compressor) — evens out loudness between tracks so one
   // isn't much quieter/louder than another.
   const normalizerRef = useRef<DynamicsCompressorNode | null>(null)
+  // hls.js instance for native Rutube HLS playback (see rtUseEmbed below).
+  const hlsRef = useRef<Hls | null>(null)
 
   const ensureAudioGraph = useCallback(
     (forVideo: boolean) => {
@@ -264,6 +289,23 @@ export function MusicPlayer() {
   const [previewTrack, setPreviewTrack] = useState<Track | null>(null)
 
   const currentTrack = previewTrack || tracks[currentIndex]
+  // True when the current track is a Rutube video.
+  const isRtTrack = !!currentTrack?.isVideo && isRutubeUrl(currentTrack.url)
+  // Video playback mode for Rutube tracks. Default is native HLS: hls.js
+  // feeds the <video> element via MSE (blob:) with the signed balancer
+  // manifest resolved directly (see lib/rutube.ts), so Web Audio can capture
+  // the element and the spectrum visualizer gets REAL data — exactly like
+  // music tracks. If HLS fails for a given video (DRM, ACL, region…) we
+  // fall back to the official iframe embed, whose audio is untappable
+  // (visualizer runs its animated wave there).
+  const [rtUseEmbed, setRtUseEmbed] = useState(false)
+  const isRtEmbed = isRtTrack && rtUseEmbed
+  const isRtHls = isRtTrack && !rtUseEmbed
+  // Reset the fallback when switching to another video — every track gets
+  // a fresh HLS attempt.
+  useEffect(() => {
+    setRtUseEmbed(false)
+  }, [currentTrack?.id])
 
   // ---- Theme handling ----
   useEffect(() => {
@@ -317,11 +359,14 @@ export function MusicPlayer() {
     ;(async () => {
       const saved = await loadLibrary()
       if (cancelled) return
-      if (saved.length > 0) {
+      // Drop stale Dailymotion embed tracks — that integration was replaced
+      // with Rutube, and the old dailymotion:* URLs can no longer play.
+      const usable = saved.filter((s) => !s.url?.startsWith("dailymotion:"))
+      if (usable.length > 0) {
         const restored: Track[] = []
-        for (const s of saved) {
+        for (const s of usable) {
           if (s.isStream) {
-            // Streaming tracks (Audius): keep their permanent remote URL.
+            // Streaming tracks (MP3mn): keep their permanent remote URL.
             restored.push({ ...s, hasAudioBlob: undefined } as Track)
           } else {
             // Local uploaded tracks: rebuild the blob URL from stored bytes.
@@ -394,12 +439,17 @@ export function MusicPlayer() {
     }
   }, [audioKey])
 
-  // Sync volume to BOTH the audio and the video element (whichever is active).
+  // Sync volume to BOTH the audio and the video element (whichever is
+  // active). The Rutube embed receives it as a best-effort postMessage.
   useEffect(() => {
     const v = muted ? 0 : volume
+    if (isRtEmbed) {
+      rtCommand("volume", v)
+      return
+    }
     if (audioRef.current) audioRef.current.volume = v
     if (videoRef.current) videoRef.current.volume = v
-  }, [volume, muted, audioKey])
+  }, [volume, muted, audioKey, isRtEmbed, rtCommand])
 
   // Reset playback state + switch to a track (called from event handlers, not effects)
   const selectTrack = useCallback(
@@ -423,6 +473,49 @@ export function MusicPlayer() {
   // clicks a track in the playlist or from search — NOT on initial load.
   const shouldAutoPlayRef = useRef(false)
 
+  // ---- Search ----
+  // Library mode: filter the existing playlist by the query string.
+  const filteredTracks = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (searchMode !== "library" || !q) return tracks
+    return tracks.filter(
+      (t) =>
+        t.title.toLowerCase().includes(q) ||
+        t.artist.toLowerCase().includes(q) ||
+        (t.album || "").toLowerCase().includes(q)
+    )
+  }, [tracks, searchQuery, searchMode])
+
+  // Sorted tracks for display — applies the user-selected sort mode.
+  // NOTE: declared BEFORE playNext/playPrev/handleEnded — their deps arrays
+  // reference sortedTracks, so it must exist by that point in the render.
+  const sortedTracks = useMemo(() => {
+    const base = searchMode === "library" && searchQuery.trim() ? filteredTracks : tracks
+    if (sortMode === "default") return base
+    const sorted = [...base]
+    const dir = sortAsc ? 1 : -1
+    switch (sortMode) {
+      case "title":
+        sorted.sort((a, b) => a.title.localeCompare(b.title, "ru") * dir)
+        break
+      case "artist":
+        sorted.sort((a, b) => a.artist.localeCompare(b.artist, "ru") * dir)
+        break
+      case "duration":
+        sorted.sort((a, b) => (a.duration - b.duration) * dir)
+        break
+      case "date":
+        // Date added = index in original tracks array (higher = newer)
+        sorted.sort((a, b) => {
+          const ia = tracks.indexOf(a)
+          const ib = tracks.indexOf(b)
+          return (ia - ib) * dir
+        })
+        break
+    }
+    return sorted
+  }, [tracks, filteredTracks, sortMode, sortAsc, searchMode, searchQuery])
+
   // When the playing track changes, stop the OTHER media element so audio
   // and video never play simultaneously, then LOAD the active one.
   // Auto-plays ONLY if shouldAutoPlayRef was set (user clicked a track).
@@ -440,6 +533,9 @@ export function MusicPlayer() {
       audio.currentTime = 0
     }
     if (currentTrack.isVideo) {
+      // Native Rutube HLS mode: the dedicated hls.js effect below owns the
+      // element (graph attach, autoplay, error fallback) — don't fight it here.
+      if (isRtHls) return
       const video = videoRef.current
       if (video) {
         video.volume = muted ? 0 : volume
@@ -482,7 +578,98 @@ export function MusicPlayer() {
       const p = audio.play()
       if (p) p.then(() => setIsPlaying(true)).catch(() => {})
     }
-  }, [currentIndex, currentTrack?.url, currentTrack?.isVideo])
+  }, [currentIndex, currentTrack?.url, currentTrack?.isVideo, isRtHls])
+
+  // Native Rutube HLS playback — the heart of the "visualizer for video"
+  // fix. hls.js feeds the <video> via MSE (blob:). The blob stays
+  // same-origin regardless of where the segments come from, so
+  // ensureAudioGraph(true) gives the analyser REAL samples and the VFD
+  // spectrum dances to the video like it does for music. Any fatal error →
+  // fall back to the official iframe embed (its audio is untappable — the
+  // visualizer runs its animated wave there).
+  useEffect(() => {
+    if (!isRtHls || !currentTrack?.url) return
+    const video = videoRef.current
+    if (!video) return
+    const vid = rutubeId(currentTrack.url)
+    if (!vid) return
+    let cancelled = false
+    let cleanup: (() => void) | null = null
+
+    const startPlay = () => {
+      if (cancelled) return
+      // Attach the Web Audio graph (desktop only — mobile skips it to save
+      // CPU, same trade-off as local videos; the visualizer is hidden there).
+      if (typeof window === "undefined" || window.innerWidth >= 640) {
+        ensureAudioGraph(true)
+      }
+      if (audioCtxRef.current?.state === "suspended") {
+        audioCtxRef.current.resume().catch(() => {})
+      }
+      if (shouldAutoPlayRef.current) {
+        shouldAutoPlayRef.current = false
+        const p = video.play()
+        if (p) p.then(() => setIsPlaying(true)).catch(() => {})
+      }
+    }
+
+    ;(async () => {
+      // There is no local proxy server in the desktop/mobile builds —
+      // resolve Rutube's signed master manifest directly. Cross-origin
+      // loading is allowed there (Electron webSecurity:false / Capacitor
+      // native HTTP interceptor), and the MSE blob: stays same-origin, so
+      // the visualizer keeps getting real audio data.
+      const src = await resolveRutubeMasterUrl(vid)
+      if (cancelled) return
+      if (!src) {
+        setRtUseEmbed(true)
+        return
+      }
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({ enableWorker: true, maxBufferLength: 30 })
+        hlsRef.current = hls
+        hls.loadSource(src)
+        hls.attachMedia(video)
+        hls.on(Hls.Events.MANIFEST_PARSED, () => startPlay())
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (cancelled || !data.fatal) return
+          // Manifest/segment/network failure — the official embed usually
+          // still plays such videos (it handles DRM/ACL itself).
+          setRtUseEmbed(true)
+        })
+        cleanup = () => {
+          hls.destroy()
+          if (hlsRef.current === hls) hlsRef.current = null
+        }
+        return
+      }
+
+      // Native HLS (iOS Safari / some WebViews): give the element the
+      // master manifest directly.
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = src
+        const onMeta = () => startPlay()
+        const onErr = () => setRtUseEmbed(true)
+        video.addEventListener("loadedmetadata", onMeta)
+        video.addEventListener("error", onErr)
+        cleanup = () => {
+          video.removeEventListener("loadedmetadata", onMeta)
+          video.removeEventListener("error", onErr)
+          video.removeAttribute("src")
+        }
+        return
+      }
+
+      // No MSE and no native HLS → straight to the official embed.
+      setRtUseEmbed(true)
+    })()
+
+    return () => {
+      cancelled = true
+      cleanup?.()
+    }
+  }, [isRtHls, currentTrack?.id, currentTrack?.url, ensureAudioGraph])
 
   const playIndex = useCallback(
     (index: number) => {
@@ -525,9 +712,19 @@ export function MusicPlayer() {
       selectTrack(next)
       return
     }
+    // Advance in the DISPLAYED (sorted/filtered) order — with sorting active
+    // the storage order of `tracks` differs from what the user sees, so
+    // storage index+1 would jump to a seemingly random row.
+    const order = sortedTracks
+    if (order.length === 0) return
+    const curId = tracks[currentIndex]?.id
+    const pos = curId ? order.findIndex((t) => t.id === curId) : -1
+    const nextPos = (pos === -1 ? 0 : pos + 1) % order.length
+    const realIdx = tracks.findIndex((t) => t.id === order[nextPos].id)
+    if (realIdx === -1) return
     shouldAutoPlayRef.current = true
-    selectTrack((currentIndex + 1) % tracks.length)
-  }, [shuffle, currentIndex, tracks.length, selectTrack])
+    selectTrack(realIdx)
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const playPrev = useCallback(() => {
     if (tracks.length === 0) return
@@ -537,11 +734,25 @@ export function MusicPlayer() {
       selectTrack(prev)
       return
     }
+    // Same as playNext — follow the displayed (sorted/filtered) order.
+    const order = sortedTracks
+    if (order.length === 0) return
+    const curId = tracks[currentIndex]?.id
+    const pos = curId ? order.findIndex((t) => t.id === curId) : -1
+    const prevPos = (pos === -1 ? 0 : pos - 1 + order.length) % order.length
+    const realIdx = tracks.findIndex((t) => t.id === order[prevPos].id)
+    if (realIdx === -1) return
     shouldAutoPlayRef.current = true
-    selectTrack((currentIndex - 1 + tracks.length) % tracks.length)
-  }, [shuffle, currentIndex, tracks.length, selectTrack])
+    selectTrack(realIdx)
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const togglePlay = useCallback(() => {
+    // Rutube embeds are controlled via postMessage commands; native HLS
+    // falls through to the regular <video> element below.
+    if (isRtEmbed) {
+      rtCommand(isPlaying ? "pause" : "play")
+      return
+    }
     // Video tracks use their own visible <video> element (with controls).
     if (currentTrack?.isVideo) {
       const video = videoRef.current
@@ -560,11 +771,17 @@ export function MusicPlayer() {
     } else {
       audio.pause()
     }
-  }, [currentTrack?.isVideo])
+  }, [currentTrack?.isVideo, isRtEmbed, isPlaying, rtCommand])
 
   const handleEnded = useCallback(() => {
     if (repeatMode === "one") {
       if (currentTrack?.isVideo) {
+        // Rutube embeds restart via the play command (no media element);
+        // native HLS restarts the <video> like any other video.
+        if (isRtEmbed) {
+          rtCommand("play")
+          return
+        }
         const video = videoRef.current
         if (video) {
           video.currentTime = 0
@@ -579,7 +796,14 @@ export function MusicPlayer() {
       }
       return
     }
-    if (!shuffle && repeatMode === "off" && currentIndex === tracks.length - 1) {
+    // Stop only when the current track is the LAST one in the DISPLAYED
+    // (sorted/filtered) order — not in storage order.
+    const order = sortedTracks
+    const curId = currentTrack?.id
+    const isLastInView =
+      order.length === 0 ||
+      (curId !== undefined && order.findIndex((t) => t.id === curId) === order.length - 1)
+    if (!shuffle && repeatMode === "off" && isLastInView) {
       setIsPlaying(false)
       if (currentTrack?.isVideo) {
         const video = videoRef.current
@@ -597,16 +821,109 @@ export function MusicPlayer() {
       return
     }
     playNext()
-  }, [repeatMode, shuffle, currentIndex, tracks.length, playNext, currentTrack?.isVideo])
+  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo, isRtEmbed, rtCommand])
+
+  // Rutube iframe events: the embed posts JSON STRINGS {type,data} with
+  // origin https://rutube.ru (verified against the live player). The source
+  // check guarantees the message comes from OUR embed, not any other one.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== "https://rutube.ru") return
+      let msg: { type?: string; data?: Record<string, unknown> } | null = null
+      try { msg = typeof e.data === "string" ? JSON.parse(e.data) : e.data } catch { return }
+      if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return
+      if (!rtFrameRef.current || e.source !== rtFrameRef.current.contentWindow) return
+      const d = (msg.data ?? {}) as {
+        currentTime?: number
+        time?: number
+        duration?: number
+        state?: string
+        isPlaying?: boolean
+        playOptions?: { acl_access?: { allowed?: boolean } }
+      }
+      switch (msg.type) {
+        case "player:init":
+        case "player:ready":
+          rtGotEventRef.current = true
+          setRtUnavailable(false)
+          setIsLoading(false)
+          break
+        case "player:playStart":
+          rtGotEventRef.current = true
+          setRtUnavailable(false)
+          setIsPlaying(true)
+          setIsLoading(false)
+          break
+        case "player:changeState":
+          rtGotEventRef.current = true
+          if (d.state === "complete") { handleEnded(); break }
+          if (d.isPlaying === true) { setIsPlaying(true); setIsLoading(false) }
+          else if (d.state === "pause" || d.state === "stop") setIsPlaying(false)
+          // "seeking"/"seeked"/"buffering" don't change our play state
+          break
+        case "player:canPlay":
+          rtGotEventRef.current = true
+          // Fallback for autoplay=1 being blocked: as soon as the embed is
+          // ready, request playback if the user actually clicked a track.
+          if (shouldAutoPlayRef.current) {
+            shouldAutoPlayRef.current = false
+            rtCommand("play")
+          }
+          break
+        case "player:currentTime": {
+          rtGotEventRef.current = true
+          const t = typeof d.currentTime === "number" ? d.currentTime : d.time
+          if (typeof t === "number" && Math.abs(t - progressRef.current) > 0.25) {
+            progressRef.current = t
+            setProgress(t)
+          }
+          if (d.duration && d.duration > 0) setDuration(d.duration)
+          break
+        }
+        case "player:durationChange":
+          if (d.duration && d.duration > 0) setDuration(d.duration)
+          break
+        case "player:playOptionsLoaded":
+          rtGotEventRef.current = true
+          if (d.playOptions?.acl_access?.allowed === false) setRtUnavailable(true)
+          break
+        case "player:error":
+          rtGotEventRef.current = true
+          setRtUnavailable(true)
+          break
+      }
+    }
+    window.addEventListener("message", onMessage)
+    return () => window.removeEventListener("message", onMessage)
+  }, [handleEnded, rtCommand])
+
+  // If the embed never proves itself alive (no events within 8s), assume the
+  // player host is unavailable (region/network block) and surface a helpful
+  // hint instead of a silent black rectangle.
+  useEffect(() => {
+    if (!isRtEmbed) { setRtUnavailable(false); return }
+    rtGotEventRef.current = false
+    const t = setTimeout(() => {
+      if (!rtGotEventRef.current) setRtUnavailable(true)
+    }, 8000)
+    return () => clearTimeout(t)
+  }, [isRtEmbed, currentTrack?.url])
 
   const seek = useCallback(
     (value: number) => {
+      // The Rutube embed doesn't accept seek commands (verified against the
+      // live player) — its own controls handle seeking; our slider just
+      // reflects the position. Native HLS seeks the <video> like normal.
+      if (isRtEmbed) {
+        setProgress(value)
+        return
+      }
       const media = currentTrack?.isVideo ? videoRef.current : audioRef.current
       if (!media || !Number.isFinite(media.duration)) return
       media.currentTime = value
       setProgress(value)
     },
-    [currentTrack?.isVideo]
+    [currentTrack?.isVideo, isRtEmbed]
   )
 
 
@@ -624,12 +941,24 @@ export function MusicPlayer() {
     const actions = ["play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto"] as const
     const h: Record<string, (d: any) => void> = {
       play: () => {
+        const t = latestRef.current.currentTrack
+        if (t?.isVideo && isRutubeUrl(t.url) && rtUseEmbed) {
+          rtCommand("play")
+          mediaSessionApi.setPlaybackState("playing")
+          return
+        }
         const el = getActiveMedia()
         if (el) {
           el.play().then(() => mediaSessionApi.setPlaybackState("playing")).catch(() => mediaSessionApi.setPlaybackState("paused"))
         } else mediaSessionApi.setPlaybackState("playing")
       },
       pause: () => {
+        const t = latestRef.current.currentTrack
+        if (t?.isVideo && isRutubeUrl(t.url) && rtUseEmbed) {
+          rtCommand("pause")
+          mediaSessionApi.setPlaybackState("paused")
+          return
+        }
         const el = getActiveMedia()
         if (el) {
           el.pause()
@@ -643,7 +972,7 @@ export function MusicPlayer() {
       seekto: (d: any) => { if (d?.seekTime != null) latestRef.current.seek(d.seekTime) },
     }
     for (const a of actions) mediaSessionApi.setActionHandler(a, h[a])
-  }, [getActiveMedia])
+  }, [getActiveMedia, rtUseEmbed])
   useEffect(() => { updateMediaSession() }, [updateMediaSession])
   useEffect(() => { mediaSessionApi.setPlaybackState(isPlaying ? "playing" : "paused") }, [isPlaying, currentTrack?.url])
   useEffect(() => { if (!currentTrack?.url) return; mediaSessionApi.setMetadata({ title: currentTrack.title, artist: currentTrack.artist, album: currentTrack.album || "7-Sonata", artwork: currentTrack.coverImage ? [{ src: currentTrack.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: currentTrack.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }); if (isPlaying) mediaSessionApi.setPlaybackState("playing") }, [currentTrack?.url])
@@ -665,7 +994,7 @@ export function MusicPlayer() {
   const folderInputRef = useRef<HTMLInputElement | null>(null)
   // Persist the current uploaded tracks (excluding demos) to IndexedDB.
   const persistLibrary = useCallback((allTracks: Track[]) => {
-    // Persist both local uploaded tracks AND streaming tracks (Audius).
+    // Persist both local uploaded tracks AND streaming tracks (MP3mn).
     //   - Local (up-*, not stream): audio bytes are stored separately in
     //     IndexedDB, so we blank the URL here and rebuild it on load.
     //   - Streaming (isStream): the URL is a permanent remote stream URL, so
@@ -684,7 +1013,7 @@ export function MusicPlayer() {
     async (files: FileList | File[] | null) => {
       if (!files || (files as FileList).length === 0) return
       const palettes = [
-        { from: "#10b981", to: "#0ea5e9" },
+        { from: "#8b5cf6", to: "#d946ef" },
         { from: "#f43f5e", to: "#f59e0b" },
         { from: "#8b5cf6", to: "#ec4899" },
         { from: "#14b8a6", to: "#84cc16" },
@@ -827,47 +1156,6 @@ export function MusicPlayer() {
     [tracks, currentIndex, persistLibrary]
   )
 
-  // ---- Search ----
-  // Library mode: filter the existing playlist by the query string.
-  const filteredTracks = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase()
-    if (searchMode !== "library" || !q) return tracks
-    return tracks.filter(
-      (t) =>
-        t.title.toLowerCase().includes(q) ||
-        t.artist.toLowerCase().includes(q) ||
-        (t.album || "").toLowerCase().includes(q)
-    )
-  }, [tracks, searchQuery, searchMode])
-
-  // Sorted tracks for display — applies the user-selected sort mode.
-  const sortedTracks = useMemo(() => {
-    const base = searchMode === "library" && searchQuery.trim() ? filteredTracks : tracks
-    if (sortMode === "default") return base
-    const sorted = [...base]
-    const dir = sortAsc ? 1 : -1
-    switch (sortMode) {
-      case "title":
-        sorted.sort((a, b) => a.title.localeCompare(b.title, "ru") * dir)
-        break
-      case "artist":
-        sorted.sort((a, b) => a.artist.localeCompare(b.artist, "ru") * dir)
-        break
-      case "duration":
-        sorted.sort((a, b) => (a.duration - b.duration) * dir)
-        break
-      case "date":
-        // Date added = index in original tracks array (higher = newer)
-        sorted.sort((a, b) => {
-          const ia = tracks.indexOf(a)
-          const ib = tracks.indexOf(b)
-          return (ia - ib) * dir
-        })
-        break
-    }
-    return sorted
-  }, [tracks, filteredTracks, sortMode, sortAsc, searchMode, searchQuery])
-
   // Self-heal: ensure every playlist track that HAS a cover image also has
   // real cover colors. Catches tracks added via "Add all" (before extraction
   // ran), entries restored from IndexedDB by older versions without the
@@ -908,27 +1196,47 @@ export function MusicPlayer() {
       if (mnResults.length > 0) {
         const converted = mnResults.map(mp3mnToTrack)
         setSearchResults(converted)
-        void Promise.all(converted.map(async (t) => {
-          if (t.coverImage) return t
-          const enriched = await enrichFromITunes(`${t.artist} ${t.title}`.trim())
-          if (enriched?.coverImage) {
-            setSearchResults((prev) => prev.map((x) => x.id === t.id ? { ...x, coverImage: enriched.coverImage } : x))
-            // Also update playlist copies that were added before enrichment
-            // finished (e.g. user pressed "Add all" immediately). The
-            // self-heal effect will then extract colors for them.
-            setTracks((prev) => {
-              if (!prev.some((x) => x.url === t.url && !x.coverImage)) return prev
-              const next = prev.map((x) => x.url === t.url && !x.coverImage ? { ...x, coverImage: enriched.coverImage! } : x)
-              persistLibrary(next)
-              return next
-            })
+        // Enrich covers from iTunes with a small worker pool — an aggregated
+        // search can return 40-90 tracks and blasting that many parallel
+        // requests at iTunes would trip its rate limiting.
+        const queue = converted.filter((t) => !t.coverImage)
+        let qi = 0
+        const enrichWorker = async () => {
+          while (qi < queue.length) {
+            const t = queue[qi++]
+            const enriched = await enrichFromITunes(`${t.artist} ${t.title}`.trim())
+            if (enriched?.coverImage) {
+              setSearchResults((prev) => prev.map((x) => x.id === t.id ? { ...x, coverImage: enriched.coverImage } : x))
+              // Also update playlist copies that were added before enrichment
+              // finished (e.g. user pressed "Add all" immediately). The
+              // self-heal effect will then extract colors for them.
+              setTracks((prev) => {
+                if (!prev.some((x) => x.url === t.url && !x.coverImage)) return prev
+                const next = prev.map((x) => x.url === t.url && !x.coverImage ? { ...x, coverImage: enriched.coverImage! } : x)
+                persistLibrary(next)
+                return next
+              })
+            }
           }
-        }))
+        }
+        void Promise.all(Array.from({ length: Math.min(6, queue.length) }, enrichWorker))
         return
       }
       setSearchResults([])
     } catch { setSearchResults([]) } finally { setIsSearching(false) }
   }, [searchQuery, persistLibrary])
+
+  // Video mode: query Rutube for clips. Covers come from the search
+  // response itself — no iTunes enrichment needed.
+  const runVideoSearch = useCallback(async () => {
+    const q = searchQuery.trim()
+    if (!q) { setSearchResults([]); return }
+    setIsSearching(true)
+    try {
+      const vids = await searchRutube(q)
+      setSearchResults(vids.map(rutubeToTrack))
+    } catch { setSearchResults([]) } finally { setIsSearching(false) }
+  }, [searchQuery])
 
   // Play a track from search results WITHOUT adding it to the playlist.
   // Sets it as the previewTrack so the main player displays it and the
@@ -937,6 +1245,19 @@ export function MusicPlayer() {
     (track: Track) => {
       // If same track is already the previewTrack → toggle play/pause
       if (previewTrack && previewTrack.url === track.url) {
+        // Rutube embed toggles via postMessage; native HLS via the element.
+        if (track.isVideo && isRutubeUrl(track.url) && rtUseEmbed) {
+          rtCommand(isPlaying ? "pause" : "play")
+          return
+        }
+        if (track.isVideo) {
+          const video = videoRef.current
+          if (video) {
+            if (video.paused) video.play().catch(() => {})
+            else video.pause()
+          }
+          return
+        }
         const audio = audioRef.current
         if (audio) {
           if (audio.paused) audio.play().catch(() => {})
@@ -965,7 +1286,7 @@ export function MusicPlayer() {
         })
       }
     },
-    [previewTrack]
+    [previewTrack, isPlaying, rtCommand, rtUseEmbed]
   )
 
   // Helper: check if a track is already in the playlist by title+artist
@@ -1077,8 +1398,8 @@ export function MusicPlayer() {
   }, [isPlaying])
 
   useEffect(() => {
-    coverRef.current = currentTrack?.cover ?? { from: "#10b981", to: "#0ea5e9" }
-  }, [currentTrack])
+    coverRef.current = currentTrack?.cover ?? (theme === "dark" ? { from: "#10b981", to: "#0ea5e9" } : { from: "#8b5cf6", to: "#d946ef" })
+  }, [currentTrack, theme])
 
   // ---- Retro VFD spectrum analyzer (Technics/Pioneer style) ----
   //   - 16 segmented bars (cubes), symmetric around the center: bass in the
@@ -1368,7 +1689,7 @@ export function MusicPlayer() {
     <div
       className={cn(
         "relative flex min-h-screen flex-col overflow-x-hidden bg-background text-foreground transition-colors duration-700",
-        isDragOver && "ring-2 ring-inset ring-emerald-400"
+        isDragOver && "ring-2 ring-inset ring-violet-400 dark:ring-emerald-400"
       )}
       onDragOver={(e) => {
         e.preventDefault()
@@ -1488,17 +1809,17 @@ export function MusicPlayer() {
       {/* Loading splash while restoring the saved library */}
       {!tracksReady && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-background">
-          <Disc3 className="h-12 w-12 animate-spin-slow text-emerald-400" />
+          <Disc3 className="h-12 w-12 animate-spin-slow text-violet-500 dark:text-emerald-400" />
           <p className="text-xs text-muted-foreground">Загрузка библиотеки…</p>
         </div>
       )}
 
       {/* Drag overlay hint */}
       {isDragOver && (
-        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-emerald-500/10 backdrop-blur-sm">
-          <div className="rounded-2xl border-2 border-dashed border-emerald-400 bg-background/80 px-10 py-8 text-center shadow-2xl">
-            <Upload className="mx-auto mb-2 h-8 w-8 text-emerald-400" />
-            <p className="text-sm font-medium text-emerald-500">
+        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-violet-500/10 dark:bg-emerald-500/10 backdrop-blur-sm">
+          <div className="rounded-2xl border-2 border-dashed border-violet-400 dark:border-emerald-400 bg-background/80 px-10 py-8 text-center shadow-2xl">
+            <Upload className="mx-auto mb-2 h-8 w-8 text-violet-500 dark:text-emerald-400" />
+            <p className="text-sm font-medium text-violet-500 dark:text-emerald-500">
               Отпустите файлы или папку, чтобы добавить
             </p>
           </div>
@@ -1595,9 +1916,49 @@ export function MusicPlayer() {
                    on the right resizes the section (and the playlist shrinks). */
                 <div className="flex w-full shrink-0 items-stretch">
                   <div className="relative min-w-0 flex-1 overflow-hidden bg-black shadow-2xl sm:rounded-2xl sm:shadow-2xl">
+                    {isRtEmbed ? (
+                      /* Rutube embed — official player iframe, driven via the
+                         postMessage protocol. Only used as the fallback when
+                         native HLS (and its working visualizer) can't play
+                         this video; audio here is untappable by Web Audio. */
+                      <div
+                        className="relative mx-auto w-full max-w-full"
+                        style={{ aspectRatio: "16 / 9", maxHeight: "60vh" }}
+                      >
+                        <iframe
+                          ref={rtFrameRef}
+                          key={currentTrack.id}
+                          src={`https://rutube.ru/play/embed/${rutubeId(currentTrack.url)}/?autoplay=1`}
+                          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                          allowFullScreen
+                          className="absolute inset-0 h-full w-full border-0"
+                          title={currentTrack.title}
+                          onLoad={() => {
+                            setIsLoading(false)
+                            rtCommand("volume", muted ? 0 : volume)
+                          }}
+                        />
+                        {rtUnavailable && (
+                          <div className="absolute inset-0 z-10 grid place-items-center bg-black/85 p-4 text-center">
+                            <div className="max-w-xs">
+                              <p className="text-sm font-medium text-white">Плеер Rutube не загрузился</p>
+                              <p className="mt-1 text-xs text-white/70">Возможно, видео недоступно или сервис временно не отвечает.</p>
+                              <a
+                                href={`https://rutube.ru/video/${rutubeId(currentTrack.url)}/`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-3 inline-block rounded-md bg-violet-500 dark:bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-600 dark:hover:bg-emerald-600"
+                              >
+                                Открыть на Rutube ↗
+                              </a>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
                     <video
                       ref={videoRef}
-                      src={currentTrack.url}
+                      src={isRtTrack ? undefined : currentTrack.url}
                       preload="auto"
                       // Mobile: fixed-height horizontal container (35vh).
                       // object-contain keeps the video's aspect ratio — vertical
@@ -1626,6 +1987,7 @@ export function MusicPlayer() {
                       onPause={() => setIsPlaying(false)}
                       onEnded={handleEnded}
                     />
+                    )}
                   </div>
                   {/* Vertical resize handle — hidden on mobile (no room),
                       shown on sm+ so desktop users can drag to resize. */}
@@ -1658,10 +2020,10 @@ export function MusicPlayer() {
                         resetVideoSize()
                       }
                     }}
-                    className="hidden group/handle w-2 cursor-col-resize touch-none items-center justify-center rounded-full bg-border/40 transition hover:bg-emerald-400/60 focus:bg-emerald-400 focus:outline-none sm:flex"
+                    className="hidden group/handle w-2 cursor-col-resize touch-none items-center justify-center rounded-full bg-border/40 transition hover:bg-violet-400/60 dark:hover:bg-emerald-400/60 focus:bg-violet-400 dark:focus:bg-emerald-400 focus:outline-none sm:flex"
                     title="Тяните, чтобы изменить размер. Двойной клик — сбросить"
                   >
-                    <div className="h-10 w-1 rounded-full bg-muted-foreground/40 transition group-hover/handle:bg-emerald-300" />
+                    <div className="h-10 w-1 rounded-full bg-muted-foreground/40 transition group-hover/handle:bg-violet-300 dark:group-hover/handle:bg-emerald-300" />
                   </div>
                 </div>
               ) : (
@@ -1688,8 +2050,8 @@ export function MusicPlayer() {
                   </div>
                   {isPlaying && (
                     <span className="absolute -right-1 -top-1 flex h-4 w-4">
-                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                      <span className="relative inline-flex h-4 w-4 rounded-full bg-emerald-500" />
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-75 dark:bg-emerald-400" />
+                      <span className="relative inline-flex h-4 w-4 rounded-full bg-violet-500 dark:bg-emerald-500" />
                     </span>
                   )}
                 </div>
@@ -1702,7 +2064,7 @@ export function MusicPlayer() {
                 // the title/controls don't touch the screen edge.
                 currentTrack?.isVideo ? "p-4 sm:p-0" : ""
               )}>
-                <p className="text-xs font-medium uppercase tracking-widest text-emerald-400 drop-shadow">
+                <p className="text-xs font-medium uppercase tracking-widest text-violet-500 dark:text-emerald-400 drop-shadow">
                   {isLoading ? "Загрузка…" : isPlaying ? "Сейчас играет" : "Пауза"}
                 </p>
                 <h2 className="mt-1 truncate text-2xl font-bold tracking-tight drop-shadow-sm sm:text-3xl">
@@ -1751,7 +2113,7 @@ export function MusicPlayer() {
                   onClick={() => setShuffle((s) => !s)}
                   className={cn(
                     "h-9 w-9 text-foreground/80 hover:text-foreground",
-                    shuffle && "text-emerald-400 hover:text-emerald-300"
+                    shuffle && "text-violet-500 hover:text-violet-400 dark:text-emerald-400 dark:hover:text-emerald-300"
                   )}
                   aria-pressed={shuffle}
                   title="Перемешать"
@@ -1764,7 +2126,7 @@ export function MusicPlayer() {
                   onClick={cycleRepeat}
                   className={cn(
                     "h-9 w-9 text-foreground/80 hover:text-foreground",
-                    repeatMode !== "off" && "text-emerald-400 hover:text-emerald-300"
+                    repeatMode !== "off" && "text-violet-500 hover:text-violet-400 dark:text-emerald-400 dark:hover:text-emerald-300"
                   )}
                   title={repeatLabel}
                   aria-label={repeatLabel}
@@ -1792,7 +2154,7 @@ export function MusicPlayer() {
                   onClick={onPlayClick}
                   disabled={!tracksReady || !currentTrack?.url}
                   size="icon"
-                  className="h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-xl shadow-emerald-500/10 transition hover:scale-105 hover:bg-primary disabled:opacity-40 disabled:hover:scale-100"
+                  className="h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-xl shadow-violet-500/10 dark:shadow-emerald-500/10 transition hover:scale-105 hover:bg-primary disabled:opacity-40 disabled:hover:scale-100"
                   aria-label={isPlaying ? "Пауза" : "Играть"}
                 >
                   {isPlaying ? (
@@ -1852,7 +2214,7 @@ export function MusicPlayer() {
           >
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div className="flex items-center gap-2">
-                <ListMusic className="h-4 w-4 text-emerald-400" />
+                <ListMusic className="h-4 w-4 text-violet-500 dark:text-emerald-400" />
                 <h3 className="text-sm font-semibold">Плейлист</h3>
               </div>
               <div className="flex items-center gap-2">
@@ -1861,7 +2223,7 @@ export function MusicPlayer() {
                   <select
                     value={sortMode}
                     onChange={(e) => setSortMode(e.target.value as typeof sortMode)}
-                    className="h-7 rounded-md border border-border/50 bg-secondary/80 px-2 text-[11px] font-medium text-foreground/80 focus:border-emerald-400 focus:outline-none"
+                    className="h-7 rounded-md border border-border/50 bg-secondary/80 px-2 text-[11px] font-medium text-foreground/80 focus:border-violet-400 dark:focus:border-emerald-400 focus:outline-none"
                     title="Сортировка"
                   >
                     <option value="default">По умолчанию</option>
@@ -1896,7 +2258,7 @@ export function MusicPlayer() {
               </div>
             </div>
             {/* Search bar — two modes: filter the local library, or search
-                Audius online and add streaming tracks to the playlist. */}
+                MP3mn online and add streaming tracks to the playlist. */}
             <div className="border-b border-border p-3">
               <div className="mb-2 flex gap-1 rounded-lg bg-secondary p-0.5">
                 <button
@@ -1923,6 +2285,17 @@ export function MusicPlayer() {
                 >
                   Онлайн (MP3mn)
                 </button>
+                <button
+                  onClick={() => setSearchMode("video")}
+                  className={cn(
+                    "flex-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
+                    searchMode === "video"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  Видео
+                </button>
               </div>
               <div className="flex gap-2">
                 <div className="relative flex-1">
@@ -1935,14 +2308,19 @@ export function MusicPlayer() {
                       if (e.key === "Enter" && searchMode === "online") {
                         e.preventDefault()
                         void runOnlineSearch()
+                      } else if (e.key === "Enter" && searchMode === "video") {
+                        e.preventDefault()
+                        void runVideoSearch()
                       }
                     }}
                     placeholder={
                       searchMode === "library"
                         ? "Фильтр по названию…"
-                        : "Введите песню/исполнителя и Enter…"
+                        : searchMode === "video"
+                          ? "Введите название клипа и Enter…"
+                          : "Введите песню/исполнителя и Enter…"
                     }
-                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-emerald-400 focus:outline-none"
+                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-violet-400 dark:focus:border-emerald-400 focus:outline-none"
                   />
                   {searchQuery && (
                     <button
@@ -1958,11 +2336,11 @@ export function MusicPlayer() {
                     </button>
                   )}
                 </div>
-                {searchMode === "online" && (
+                {searchMode !== "library" && (
                   <button
-                    onClick={() => void runOnlineSearch()}
+                    onClick={() => void (searchMode === "video" ? runVideoSearch() : runOnlineSearch())}
                     disabled={isSearching || !searchQuery.trim()}
-                    className="shrink-0 rounded-md bg-emerald-500 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-emerald-600 disabled:opacity-40"
+                    className="shrink-0 rounded-md bg-violet-500 dark:bg-emerald-500 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-violet-600 dark:hover:bg-emerald-600 disabled:opacity-40"
                   >
                     {isSearching ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1974,7 +2352,7 @@ export function MusicPlayer() {
               </div>
             </div>
             <div className="custom-scroll flex-1 overflow-y-auto overflow-x-hidden" style={{maxHeight: "calc(100vh - 360px)"}}>
-              {searchMode === "online" ? (
+              {searchMode !== "library" ? (
                 <ul className="divide-y divide-border">
                   {searchResults.map((track) => {
                     const isInPlaylist = trackExists(track, tracks)
@@ -1985,7 +2363,7 @@ export function MusicPlayer() {
                       key={track.id}
                       className={cn(
                         "group flex w-full min-w-0 flex-col text-left transition-colors hover:bg-secondary",
-                        isCurrentTrack && "bg-emerald-500/10"
+                        isCurrentTrack && "bg-violet-500/10 dark:bg-emerald-500/10"
                       )}
                     >
                       <div className="flex w-full min-w-0 items-center gap-3 px-3 py-2.5">
@@ -2020,7 +2398,7 @@ export function MusicPlayer() {
                       <div className="min-w-0 flex-1">
                         <p className={cn(
                           "truncate text-sm font-medium",
-                          isCurrentTrack ? "text-emerald-500" : "text-foreground"
+                          isCurrentTrack ? "text-violet-500 dark:text-emerald-500" : "text-foreground"
                         )}>
                           {track.title}
                         </p>
@@ -2029,7 +2407,7 @@ export function MusicPlayer() {
                         </p>
                       </div>
                       {isCurrentTrack && (
-                        <span className="shrink-0 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-500">
+                        <span className="shrink-0 rounded-full bg-violet-500/10 dark:bg-emerald-500/10 px-2 py-0.5 text-[10px] text-violet-500 dark:text-emerald-500">
                           {formatTime(progress)} / {formatTime(duration)}
                         </span>
                       )}
@@ -2047,8 +2425,8 @@ export function MusicPlayer() {
                         className={cn(
                           "shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition",
                           isInPlaylist
-                            ? "bg-emerald-500/10 text-emerald-500"
-                            : "bg-secondary text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-400"
+                            ? "bg-violet-500/10 dark:bg-emerald-500/10 text-violet-500 dark:text-emerald-500"
+                            : "bg-secondary text-muted-foreground hover:bg-violet-500/10 dark:hover:bg-emerald-500/10 hover:text-violet-500 dark:hover:text-emerald-400"
                         )}
                       >
                         {isInPlaylist ? "✓ В плейлисте" : "+ Добавить"}
@@ -2068,7 +2446,7 @@ export function MusicPlayer() {
                     <li className="border-t border-border p-3">
                       <button
                         onClick={addAllSearchResults}
-                        className="w-full rounded-md bg-emerald-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-600"
+                        className="w-full rounded-md bg-violet-500 dark:bg-emerald-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-violet-600 dark:hover:bg-emerald-600"
                       >
                         Добавить все ({searchResults.length})
                       </button>
@@ -2086,7 +2464,7 @@ export function MusicPlayer() {
                         onClick={() => playIndex(realIdx)}
                         className={cn(
                           "group flex w-full min-w-0 items-center gap-3 px-3 py-2.5 text-left transition-colors",
-                          active ? "bg-emerald-500/10" : "hover:bg-secondary"
+                          active ? "bg-violet-500/10 dark:bg-emerald-500/10" : "hover:bg-secondary"
                         )}
                       >
                         <div
@@ -2121,7 +2499,7 @@ export function MusicPlayer() {
                           <p
                             className={cn(
                               "truncate text-sm font-medium",
-                              active ? "text-emerald-500" : "text-foreground"
+                              active ? "text-violet-500 dark:text-emerald-500" : "text-foreground"
                             )}
                             title={track.title}
                           >
@@ -2214,7 +2592,7 @@ export function MusicPlayer() {
       <div aria-hidden className={cn("pointer-events-none fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border/50 bg-background/80 px-5 py-4 shadow-2xl backdrop-blur-md transition-opacity duration-200", volumePopup.visible ? "opacity-100" : "opacity-0")}>
         <div className="flex flex-col items-center gap-2">
           <VolumeIcon className="h-6 w-6 text-foreground" />
-          <div className="flex h-24 w-2 flex-col justify-end overflow-hidden rounded-full bg-secondary"><div className="w-full rounded-full bg-emerald-500 transition-[height] duration-75" style={{ height: `${Math.round(volumePopup.value * 100)}%` }} /></div>
+          <div className="flex h-24 w-2 flex-col justify-end overflow-hidden rounded-full bg-secondary"><div className="w-full rounded-full bg-violet-500 dark:bg-emerald-500 transition-[height] duration-75" style={{ height: `${Math.round(volumePopup.value * 100)}%` }} /></div>
           <span className="text-xs font-medium tabular-nums text-foreground">{Math.round(volumePopup.value * 100)}%</span>
         </div>
       </div>
@@ -2230,7 +2608,7 @@ export function MusicPlayer() {
       <footer className="relative z-10 mt-auto border-t border-border/60 backdrop-blur-xl" style={{ backgroundColor: currentTrack ? (theme === "dark" ? `${currentTrack.cover.to}66` : `${currentTrack.cover.to}55`) : undefined }}>
         <div className="relative z-10 mx-auto flex w-full max-w-[1600px] items-center justify-between px-4 py-2.5 text-xs text-foreground/80 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2 truncate">
-            <Disc3 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+            <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
             <span className="shrink-0 text-foreground/50">v1.6.0</span>
             <span className="truncate">
@@ -2276,7 +2654,7 @@ export function MusicPlayer() {
                     >
                       {desktopSave ? (
                         <span className="flex w-full cursor-pointer items-center gap-2">
-                          <Icon className="h-4 w-4 text-emerald-500" />
+                          <Icon className="h-4 w-4 text-violet-500 dark:text-emerald-500" />
                           <span className="flex flex-col">
                             <span className="text-sm font-medium">{title}</span>
                             <span className="text-[11px] text-muted-foreground">{file}</span>
@@ -2284,7 +2662,7 @@ export function MusicPlayer() {
                         </span>
                       ) : (
                         <a href={`/api/download?file=${file}`} download={file} className="flex cursor-pointer items-center gap-2">
-                          <Icon className="h-4 w-4 text-emerald-500" />
+                          <Icon className="h-4 w-4 text-violet-500 dark:text-emerald-500" />
                           <span className="flex flex-col">
                             <span className="text-sm font-medium">{title}</span>
                             <span className="text-[11px] text-muted-foreground">{file}</span>

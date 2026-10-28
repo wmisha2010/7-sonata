@@ -1,3 +1,12 @@
+// MP3mn.net music search — full-length tracks, no API key needed.
+// Desktop (Electron) / Mobile (Capacitor) build: the fetch runs directly
+// from the renderer — cross-origin restrictions are lifted on those
+// platforms (Electron webSecurity:false, Capacitor native HTTP interceptor).
+// The aggregation logic mirrors the web app's /api/mp3mn-search route:
+// mp3mn caps ONE query at ~20-23 tracks and has no pagination, so we fire
+// the full query AND one search per significant word, in parallel, then
+// merge + dedupe (up to 200 results).
+
 import type { Track } from "./tracks"
 
 export interface Mp3mnTrack {
@@ -9,18 +18,6 @@ export interface Mp3mnTrack {
   duration: number
 }
 
-interface SonataBridge {
-  isDesktop: boolean
-  searchMp3mn: (query: string) => Promise<Mp3mnTrack[]>
-}
-
-function getBridge(): SonataBridge | null {
-  if (typeof window !== "undefined" && (window as any).sonata?.isDesktop) {
-    return (window as any).sonata as SonataBridge
-  }
-  return null
-}
-
 function parseDuration(text: string): number {
   const parts = text.trim().split(":")
   if (parts.length === 2) {
@@ -29,76 +26,98 @@ function parseDuration(text: string): number {
   return 0
 }
 
+function parseHtml(html: string, coverUrl: string | undefined, tag: number): Mp3mnTrack[] {
+  const tracks: Mp3mnTrack[] = []
+  const items = html.split(/<li[^>]*>/)
+  for (let i = 1; i < items.length; i++) {
+    const b = items[i]
+    const um = b.match(/data-url="([^"]+)"/)
+    if (!um) continue
+    const su = um[1]
+    const am = b.match(/class="playlist-name-artist"[^>]*><a[^>]*>([^<]+)/)
+    const ar = am ? am[1].replace(/&amp;/g, "&").replace(/&#0?3[09];/g, "'") : "Unknown"
+    const tm = b.match(/class="playlist-name-title"[^>]*>.*?<em>([^<]+)/)
+    const ti = tm ? tm[1].replace(/&amp;/g, "&").replace(/&#0?3[09];/g, "'") : "Unknown"
+    const dm = b.match(/class="playlist-duration">([^<]+)/)
+    const du = dm ? parseDuration(dm[1]) : 0
+    tracks.push({
+      id: `mn-${tag}-${i}-${Date.now().toString(36)}`,
+      title: ti,
+      artist: ar,
+      artworkUrl: coverUrl,
+      streamUrl: su,
+      duration: du,
+    })
+  }
+  return tracks
+}
+
+// One search round-trip: mp3mn /api/search → track page → parse.
+async function searchOnce(q: string, tag: number): Promise<Mp3mnTrack[]> {
+  const headers = { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" }
+  const aR = await fetch(`https://mp3mn.net/api/search?query=${encodeURIComponent(q)}`, { headers })
+  if (!aR.ok) return []
+  const aJ = await aR.json()
+  const rp = aJ.url
+  if (!rp) return []
+  const pR = await fetch(`https://mp3mn.net${rp}`, { headers })
+  if (!pR.ok) return []
+  const pJ = await pR.json()
+  const html = pJ.xx1_content || pJ.xx2_content || ""
+  const cm = html.match(/src="(\/public\/album\/[^"]+)"/)
+  const cu = cm ? `https://mp3mn.net${cm[1]}` : undefined
+  return parseHtml(html, cu, tag)
+}
+
+// Distinctive words of the query for extra probes: drop 1-2 char filler
+// ("и", "of"), longest (most distinctive) first, max 4 probes.
+function probeWords(q: string): string[] {
+  const words = q.split(/\s+/).filter(Boolean)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const w of [...words].sort((a, b) => b.length - a.length)) {
+    const k = w.toLowerCase()
+    if (k.length < 3 || seen.has(k)) continue
+    seen.add(k)
+    out.push(w)
+    if (out.length >= 4) break
+  }
+  return out
+}
+
 export async function searchMp3mn(query: string): Promise<Mp3mnTrack[]> {
   if (!query.trim()) return []
-  const bridge = getBridge()
-  if (bridge) return bridge.searchMp3mn(query)
   try {
-    let tracks = await searchOnce(query)
-    // mp3mn returns an EMPTY stub page for multi-word queries. Fall back to
-    // the longest words of the query (the distinctive terms).
-    if (!tracks.length) {
-      const words = query.split(/\s+/).filter(Boolean).sort((a, b) => b.length - a.length)
-      for (const w of words.slice(0, 3)) {
-        if (words.length === 1) break
-        tracks = await searchOnce(w)
-        if (tracks.length) break
+    // Full query + one probe per significant word, all in parallel so the
+    // wall time stays close to a single query even for multi-word input.
+    const probes = probeWords(query).filter((w) => w.toLowerCase() !== query.toLowerCase())
+    const queries = [query, ...probes]
+    const batches = await Promise.all(queries.map((s, i) => searchOnce(s, i).catch(() => [])))
+    // Merge: full-query hits first, then word probes. Dedupe across queries
+    // by stream filename and artist+title (mp3mn re-serves the same songs).
+    const merged: Mp3mnTrack[] = []
+    const sf = new Set<string>()
+    const st = new Set<string>()
+    for (const batch of batches) {
+      for (const t of batch) {
+        const fn = t.streamUrl.split("/").pop() || t.streamUrl
+        const tk = `${t.artist.trim().toLowerCase()}|${t.title.trim().toLowerCase()}`
+        if (sf.has(fn) || st.has(tk)) continue
+        sf.add(fn)
+        st.add(tk)
+        merged.push(t)
       }
     }
-    return tracks
+    return merged.slice(0, 200)
   } catch {
     return []
   }
 }
 
-async function searchOnce(query: string): Promise<Mp3mnTrack[]> {
-  const apiUrl = `https://mp3mn.net/api/search?query=${encodeURIComponent(query)}`
-  const apiRes = await fetch(apiUrl, {
-    headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" },
-  })
-  if (!apiRes.ok) throw new Error("api failed")
-  const apiJson = await apiRes.json()
-  const redirectPath = apiJson.url
-  if (!redirectPath) throw new Error("no redirect")
-  const pageUrl = `https://mp3mn.net${redirectPath}`
-  const pageRes = await fetch(pageUrl, {
-    headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" },
-  })
-  if (!pageRes.ok) throw new Error("page failed")
-  const pageJson = await pageRes.json()
-  const html = pageJson.xx1_content || pageJson.xx2_content || ""
-  const coverMatch = html.match(/src="(\/public\/album\/[^"]+)"/)
-  const coverUrl = coverMatch ? `https://mp3mn.net${coverMatch[1]}` : undefined
-  return parseHtml(html, coverUrl)
-}
-
-function parseHtml(html: string, coverUrl?: string): Mp3mnTrack[] {
-  const tracks: Mp3mnTrack[] = []
-  const seenFilenames = new Set<string>()
-  const seenTitles = new Set<string>()
-  const items = html.split(/<li[^>]*>/)
-  for (let i = 1; i < items.length; i++) {
-    const block = items[i]
-    const urlMatch = block.match(/data-url="([^"]+)"/)
-    if (!urlMatch) continue
-    const streamUrl = urlMatch[1]
-    const filename = streamUrl.split("/").pop() || streamUrl
-    if (seenFilenames.has(filename)) continue
-    const artistMatch = block.match(/class="playlist-name-artist"[^>]*><a[^>]*>([^<]+)/)
-    const artist = artistMatch ? artistMatch[1].replace(/&amp;/g, "&").replace(/&#0?3[09];/g, "'") : "Unknown"
-    const titleMatch = block.match(/class="playlist-name-title"[^>]*>.*?<em>([^<]+)/)
-    const title = titleMatch ? titleMatch[1].replace(/&amp;/g, "&").replace(/&#0?3[09];/g, "'") : "Unknown"
-    const titleKey = `${artist.trim().toLowerCase()}|${title.trim().toLowerCase()}`
-    if (seenTitles.has(titleKey)) continue
-    const durMatch = block.match(/class="playlist-duration">([^<]+)/)
-    const duration = durMatch ? parseDuration(durMatch[1]) : 0
-    seenFilenames.add(filename)
-    seenTitles.add(titleKey)
-    tracks.push({ id: `mn-${i}-${Date.now().toString(36)}`, title, artist, artworkUrl: coverUrl, streamUrl, duration })
-  }
-  return tracks.slice(0, 25)
-}
-
+// Convert an mp3mn search result into the app's Track shape. The stream URL
+// stays direct — on desktop/mobile there is no local proxy server, and the
+// platforms allow cross-origin media (playback works; the Web Audio graph
+// detaches for remote streams exactly like in the web build).
 export function mp3mnToTrack(a: Mp3mnTrack): Track {
   return {
     id: a.id,
