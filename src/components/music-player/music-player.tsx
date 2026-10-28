@@ -42,7 +42,7 @@ import { extractAudioMeta } from "@/lib/metadata"
 import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichment"
 import { extractCoverColors } from "@/lib/color-extract"
 import { searchMp3mn, mp3mnToTrack } from "@/lib/mp3mn"
-import { searchDailymotion, dailymotionToTrack, isDailymotionUrl, dailymotionId } from "@/lib/dailymotion"
+import { searchRutube, rutubeToTrack, isRutubeUrl, rutubeId } from "@/lib/rutube"
 import {
   loadLibrary,
   saveLibrary,
@@ -102,7 +102,7 @@ export function MusicPlayer() {
   const [isDragOver, setIsDragOver] = useState(false)
   // ---- Search ----
   // Three modes: filter the local library, search MP3mn online for audio
-  // tracks, or search Dailymotion for video clips — both online modes add
+  // tracks, or search Rutube for video clips — both online modes add
   // streaming tracks to the playlist.
   const [searchMode, setSearchMode] = useState<"library" | "online" | "video">("library")
   const [searchQuery, setSearchQuery] = useState("")
@@ -115,16 +115,26 @@ export function MusicPlayer() {
   const [previewProgress, setPreviewProgress] = useState(0)
   const [previewDuration, setPreviewDuration] = useState(0)
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
-  // Dailymotion embed player (iframe) — playback is driven via postMessage
-  // commands; state comes back as message events (playing/pause/timeupdate).
-  const dmFrameRef = useRef<HTMLIFrameElement | null>(null)
+  // Rutube embed player (iframe) — playback is driven via the postMessage
+  // protocol: commands are JSON strings {type:"player:play"|"player:pause"},
+  // events come back as JSON strings {type:"player:...",data:{...}}.
+  const rtFrameRef = useRef<HTMLIFrameElement | null>(null)
   // Set once the embed proves itself alive (any postMessage event received).
-  // If no event ever arrives (player host blocked/unavailable — e.g. region
-  // restrictions), we show a fallback hint instead of a silent black box.
-  const dmGotEventRef = useRef(false)
-  const [dmUnavailable, setDmUnavailable] = useState(false)
-  const dmCommand = useCallback((method: string, value?: number | boolean) => {
-    try { dmFrameRef.current?.contentWindow?.postMessage(value === undefined ? { method } : { method, value }, "*") } catch {}
+  // If no event ever arrives (player host blocked/unavailable), we show a
+  // fallback hint instead of a silent black box.
+  const rtGotEventRef = useRef(false)
+  const [rtUnavailable, setRtUnavailable] = useState(false)
+  // Verified against the live embed: play/pause work; seek is NOT supported
+  // by the embed (its own controls handle it); volume is sent best-effort.
+  const rtCommand = useCallback((method: "play" | "pause" | "volume", value?: number | boolean) => {
+    const win = rtFrameRef.current?.contentWindow
+    if (!win) return
+    let payload: string | null = null
+    if (method === "play") payload = JSON.stringify({ type: "player:play" })
+    else if (method === "pause") payload = JSON.stringify({ type: "player:pause" })
+    else if (method === "volume" && typeof value === "number") payload = JSON.stringify({ type: "player:volume", data: { volume: value } })
+    if (!payload) return
+    try { win.postMessage(payload, "*") } catch {}
   }, [])
   // Collapse the playlist panel (especially useful on mobile / narrow screens
   // so the player gets the full width).
@@ -276,8 +286,8 @@ export function MusicPlayer() {
   const [previewTrack, setPreviewTrack] = useState<Track | null>(null)
 
   const currentTrack = previewTrack || tracks[currentIndex]
-  // True when the current track is a Dailymotion embed (official iframe player).
-  const isDmTrack = !!currentTrack?.isVideo && isDailymotionUrl(currentTrack.url)
+  // True when the current track is a Rutube embed (official iframe player).
+  const isRtTrack = !!currentTrack?.isVideo && isRutubeUrl(currentTrack.url)
 
   // ---- Theme handling ----
   useEffect(() => {
@@ -331,9 +341,12 @@ export function MusicPlayer() {
     ;(async () => {
       const saved = await loadLibrary()
       if (cancelled) return
-      if (saved.length > 0) {
+      // Drop stale Dailymotion embed tracks — that integration was replaced
+      // with Rutube, and the old dailymotion:* URLs can no longer play.
+      const usable = saved.filter((s) => !s.url?.startsWith("dailymotion:"))
+      if (usable.length > 0) {
         const restored: Track[] = []
-        for (const s of saved) {
+        for (const s of usable) {
           if (s.isStream) {
             // Streaming tracks (MP3mn): keep their permanent remote URL.
             restored.push({ ...s, hasAudioBlob: undefined } as Track)
@@ -409,17 +422,16 @@ export function MusicPlayer() {
   }, [audioKey])
 
   // Sync volume to BOTH the audio and the video element (whichever is
-  // active). Dailymotion embeds receive it as postMessage commands.
+  // active). The Rutube embed receives it as a best-effort postMessage.
   useEffect(() => {
     const v = muted ? 0 : volume
-    if (isDmTrack) {
-      dmCommand("setVolume", v)
-      dmCommand("muted", muted)
+    if (isRtTrack) {
+      rtCommand("volume", v)
       return
     }
     if (audioRef.current) audioRef.current.volume = v
     if (videoRef.current) videoRef.current.volume = v
-  }, [volume, muted, audioKey, isDmTrack, dmCommand])
+  }, [volume, muted, audioKey, isRtTrack, rtCommand])
 
   // Reset playback state + switch to a track (called from event handlers, not effects)
   const selectTrack = useCallback(
@@ -623,9 +635,9 @@ export function MusicPlayer() {
   }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
 
   const togglePlay = useCallback(() => {
-    // Dailymotion embeds are controlled via postMessage commands.
-    if (isDmTrack) {
-      dmCommand(isPlaying ? "pause" : "play")
+    // Rutube embeds are controlled via postMessage commands.
+    if (isRtTrack) {
+      rtCommand(isPlaying ? "pause" : "play")
       return
     }
     // Video tracks use their own visible <video> element (with controls).
@@ -646,11 +658,16 @@ export function MusicPlayer() {
     } else {
       audio.pause()
     }
-  }, [currentTrack?.isVideo, isDmTrack, isPlaying, dmCommand])
+  }, [currentTrack?.isVideo, isRtTrack, isPlaying, rtCommand])
 
   const handleEnded = useCallback(() => {
     if (repeatMode === "one") {
       if (currentTrack?.isVideo) {
+        // Rutube embeds restart via the play command (no media element).
+        if (currentTrack.url && isRutubeUrl(currentTrack.url)) {
+          rtCommand("play")
+          return
+        }
         const video = videoRef.current
         if (video) {
           video.currentTime = 0
@@ -690,63 +707,100 @@ export function MusicPlayer() {
       return
     }
     playNext()
-  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo])
+  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo, rtCommand])
 
-  // Dailymotion iframe events (api=1): playback state, progress and end.
-  // The source check guarantees the message comes from OUR embed, not any
-  // other Dailymotion iframe on the page.
+  // Rutube iframe events: the embed posts JSON STRINGS {type,data} with
+  // origin https://rutube.ru (verified against the live player). The source
+  // check guarantees the message comes from OUR embed, not any other one.
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      const data = e.data as { event?: string; time?: number; duration?: number } | null
-      if (!data || typeof data !== "object" || typeof data.event !== "string") return
-      if (!dmFrameRef.current || e.source !== dmFrameRef.current.contentWindow) return
-      switch (data.event) {
-        case "start":
-        case "playing":
-          dmGotEventRef.current = true
-          setDmUnavailable(false)
+      if (e.origin !== "https://rutube.ru") return
+      let msg: { type?: string; data?: Record<string, unknown> } | null = null
+      try { msg = typeof e.data === "string" ? JSON.parse(e.data) : e.data } catch { return }
+      if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return
+      if (!rtFrameRef.current || e.source !== rtFrameRef.current.contentWindow) return
+      const d = (msg.data ?? {}) as {
+        currentTime?: number
+        time?: number
+        duration?: number
+        state?: string
+        isPlaying?: boolean
+        playOptions?: { acl_access?: { allowed?: boolean } }
+      }
+      switch (msg.type) {
+        case "player:init":
+        case "player:ready":
+          rtGotEventRef.current = true
+          setRtUnavailable(false)
+          setIsLoading(false)
+          break
+        case "player:playStart":
+          rtGotEventRef.current = true
+          setRtUnavailable(false)
           setIsPlaying(true)
           setIsLoading(false)
-          if (data.duration && data.duration > 0) setDuration(data.duration)
           break
-        case "pause":
-          dmGotEventRef.current = true
-          setIsPlaying(false)
+        case "player:changeState":
+          rtGotEventRef.current = true
+          if (d.state === "complete") { handleEnded(); break }
+          if (d.isPlaying === true) { setIsPlaying(true); setIsLoading(false) }
+          else if (d.state === "pause" || d.state === "stop") setIsPlaying(false)
+          // "seeking"/"seeked"/"buffering" don't change our play state
           break
-        case "timeupdate":
-          dmGotEventRef.current = true
-          if (typeof data.time === "number" && Math.abs(data.time - progressRef.current) > 0.25) {
-            progressRef.current = data.time
-            setProgress(data.time)
+        case "player:canPlay":
+          rtGotEventRef.current = true
+          // Fallback for autoplay=1 being blocked: as soon as the embed is
+          // ready, request playback if the user actually clicked a track.
+          if (shouldAutoPlayRef.current) {
+            shouldAutoPlayRef.current = false
+            rtCommand("play")
           }
-          if (data.duration && data.duration > 0) setDuration(data.duration)
           break
-        case "video_end":
-          handleEnded()
+        case "player:currentTime": {
+          rtGotEventRef.current = true
+          const t = typeof d.currentTime === "number" ? d.currentTime : d.time
+          if (typeof t === "number" && Math.abs(t - progressRef.current) > 0.25) {
+            progressRef.current = t
+            setProgress(t)
+          }
+          if (d.duration && d.duration > 0) setDuration(d.duration)
+          break
+        }
+        case "player:durationChange":
+          if (d.duration && d.duration > 0) setDuration(d.duration)
+          break
+        case "player:playOptionsLoaded":
+          rtGotEventRef.current = true
+          if (d.playOptions?.acl_access?.allowed === false) setRtUnavailable(true)
+          break
+        case "player:error":
+          rtGotEventRef.current = true
+          setRtUnavailable(true)
           break
       }
     }
     window.addEventListener("message", onMessage)
     return () => window.removeEventListener("message", onMessage)
-  }, [handleEnded])
+  }, [handleEnded, rtCommand])
 
   // If the embed never proves itself alive (no events within 8s), assume the
   // player host is unavailable (region/network block) and surface a helpful
   // hint instead of a silent black rectangle.
   useEffect(() => {
-    if (!isDmTrack) { setDmUnavailable(false); return }
-    dmGotEventRef.current = false
+    if (!isRtTrack) { setRtUnavailable(false); return }
+    rtGotEventRef.current = false
     const t = setTimeout(() => {
-      if (!dmGotEventRef.current) setDmUnavailable(true)
+      if (!rtGotEventRef.current) setRtUnavailable(true)
     }, 8000)
     return () => clearTimeout(t)
-  }, [isDmTrack, currentTrack?.url])
+  }, [isRtTrack, currentTrack?.url])
 
   const seek = useCallback(
     (value: number) => {
-      // Dailymotion embeds are seeked via postMessage.
-      if (isDmTrack) {
-        dmCommand("seek", value)
+      // The Rutube embed doesn't accept seek commands (verified against the
+      // live player) — its own controls handle seeking; our slider just
+      // reflects the position.
+      if (isRtTrack) {
         setProgress(value)
         return
       }
@@ -755,7 +809,7 @@ export function MusicPlayer() {
       media.currentTime = value
       setProgress(value)
     },
-    [currentTrack?.isVideo, isDmTrack, dmCommand]
+    [currentTrack?.isVideo, isRtTrack]
   )
 
 
@@ -774,8 +828,8 @@ export function MusicPlayer() {
     const h: Record<string, (d: any) => void> = {
       play: () => {
         const t = latestRef.current.currentTrack
-        if (t?.isVideo && isDailymotionUrl(t.url)) {
-          dmCommand("play")
+        if (t?.isVideo && isRutubeUrl(t.url)) {
+          rtCommand("play")
           mediaSessionApi.setPlaybackState("playing")
           return
         }
@@ -786,8 +840,8 @@ export function MusicPlayer() {
       },
       pause: () => {
         const t = latestRef.current.currentTrack
-        if (t?.isVideo && isDailymotionUrl(t.url)) {
-          dmCommand("pause")
+        if (t?.isVideo && isRutubeUrl(t.url)) {
+          rtCommand("pause")
           mediaSessionApi.setPlaybackState("paused")
           return
         }
@@ -1058,15 +1112,15 @@ export function MusicPlayer() {
     } catch { setSearchResults([]) } finally { setIsSearching(false) }
   }, [searchQuery, persistLibrary])
 
-  // Video mode: query Dailymotion for clips. Covers come from the search
+  // Video mode: query Rutube for clips. Covers come from the search
   // response itself — no iTunes enrichment needed.
   const runVideoSearch = useCallback(async () => {
     const q = searchQuery.trim()
     if (!q) { setSearchResults([]); return }
     setIsSearching(true)
     try {
-      const vids = await searchDailymotion(q)
-      setSearchResults(vids.map(dailymotionToTrack))
+      const vids = await searchRutube(q)
+      setSearchResults(vids.map(rutubeToTrack))
     } catch { setSearchResults([]) } finally { setIsSearching(false) }
   }, [searchQuery])
 
@@ -1077,9 +1131,9 @@ export function MusicPlayer() {
     (track: Track) => {
       // If same track is already the previewTrack → toggle play/pause
       if (previewTrack && previewTrack.url === track.url) {
-        // Dailymotion embeds are toggled via postMessage.
-        if (isDailymotionUrl(track.url)) {
-          dmCommand(isPlaying ? "pause" : "play")
+        // Rutube embeds are toggled via postMessage.
+        if (isRutubeUrl(track.url)) {
+          rtCommand(isPlaying ? "pause" : "play")
           return
         }
         const audio = audioRef.current
@@ -1110,7 +1164,7 @@ export function MusicPlayer() {
         })
       }
     },
-    [previewTrack, isPlaying, dmCommand]
+    [previewTrack, isPlaying, rtCommand]
   )
 
   // Helper: check if a track is already in the playlist by title+artist
@@ -1740,39 +1794,39 @@ export function MusicPlayer() {
                    on the right resizes the section (and the playlist shrinks). */
                 <div className="flex w-full shrink-0 items-stretch">
                   <div className="relative min-w-0 flex-1 overflow-hidden bg-black shadow-2xl sm:rounded-2xl sm:shadow-2xl">
-                    {isDmTrack ? (
-                      /* Dailymotion embed — official player iframe, driven
-                         via the postMessage API (api=1). Autoplay is safe:
-                         the iframe only mounts after an explicit click. */
+                    {isRtTrack ? (
+                      /* Rutube embed — official player iframe, driven via the
+                         postMessage protocol. Autoplay is safe: the iframe
+                         only mounts after an explicit click. */
                       <div
                         className="relative mx-auto w-full max-w-full"
                         style={{ aspectRatio: "16 / 9", maxHeight: "60vh" }}
                       >
                         <iframe
-                          ref={dmFrameRef}
+                          ref={rtFrameRef}
                           key={currentTrack.id}
-                          src={`https://www.dailymotion.com/embed/video/${dailymotionId(currentTrack.url)}?api=1&autoplay=1&controls=1`}
+                          src={`https://rutube.ru/play/embed/${rutubeId(currentTrack.url)}/?autoplay=1`}
                           allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
                           allowFullScreen
                           className="absolute inset-0 h-full w-full border-0"
                           title={currentTrack.title}
                           onLoad={() => {
                             setIsLoading(false)
-                            dmCommand("setVolume", muted ? 0 : volume)
+                            rtCommand("volume", muted ? 0 : volume)
                           }}
                         />
-                        {dmUnavailable && (
+                        {rtUnavailable && (
                           <div className="absolute inset-0 z-10 grid place-items-center bg-black/85 p-4 text-center">
                             <div className="max-w-xs">
-                              <p className="text-sm font-medium text-white">Плеер Dailymotion не загрузился</p>
-                              <p className="mt-1 text-xs text-white/70">Возможно, сервис недоступен в вашей сети или регионе.</p>
+                              <p className="text-sm font-medium text-white">Плеер Rutube не загрузился</p>
+                              <p className="mt-1 text-xs text-white/70">Возможно, видео недоступно или сервис временно не отвечает.</p>
                               <a
-                                href={`https://www.dailymotion.com/video/${dailymotionId(currentTrack.url)}`}
+                                href={`https://rutube.ru/video/${rutubeId(currentTrack.url)}/`}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="mt-3 inline-block rounded-md bg-violet-500 dark:bg-emerald-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-violet-600 dark:hover:bg-emerald-600"
                               >
-                                Открыть на Dailymotion ↗
+                                Открыть на Rutube ↗
                               </a>
                             </div>
                           </div>
