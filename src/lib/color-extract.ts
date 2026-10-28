@@ -1,5 +1,5 @@
 export interface CoverColors { from: string; to: string }
-const DEFAULT_COLORS: CoverColors = { from: "#10b981", to: "#0ea5e9" }
+const DEFAULT_COLORS: CoverColors = { from: "#8b5cf6", to: "#d946ef" }
 function rgbToHex(r: number, g: number, b: number): string { return "#" + [r, g, b].map((x) => Math.round(x).toString(16).padStart(2, "0")).join("") }
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
   r /= 255; g /= 255; b /= 255; const max = Math.max(r, g, b), min = Math.min(r, g, b); const l = (max + min) / 2

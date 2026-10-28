@@ -684,7 +684,7 @@ export function MusicPlayer() {
     async (files: FileList | File[] | null) => {
       if (!files || (files as FileList).length === 0) return
       const palettes = [
-        { from: "#10b981", to: "#0ea5e9" },
+        { from: "#8b5cf6", to: "#d946ef" },
         { from: "#f43f5e", to: "#f59e0b" },
         { from: "#8b5cf6", to: "#ec4899" },
         { from: "#14b8a6", to: "#84cc16" },
@@ -1070,14 +1070,14 @@ export function MusicPlayer() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const useFakeRef = useRef(false)
   const isPlayingRef = useRef(isPlaying)
-  const coverRef = useRef(currentTrack?.cover ?? { from: "#10b981", to: "#0ea5e9" })
+  const coverRef = useRef(currentTrack?.cover ?? { from: "#8b5cf6", to: "#d946ef" })
 
   useEffect(() => {
     isPlayingRef.current = isPlaying
   }, [isPlaying])
 
   useEffect(() => {
-    coverRef.current = currentTrack?.cover ?? { from: "#10b981", to: "#0ea5e9" }
+    coverRef.current = currentTrack?.cover ?? { from: "#8b5cf6", to: "#d946ef" }
   }, [currentTrack])
 
   // ---- Retro VFD spectrum analyzer (Technics/Pioneer style) ----
@@ -1368,7 +1368,7 @@ export function MusicPlayer() {
     <div
       className={cn(
         "relative flex min-h-screen flex-col overflow-x-hidden bg-background text-foreground transition-colors duration-700",
-        isDragOver && "ring-2 ring-inset ring-emerald-400"
+        isDragOver && "ring-2 ring-inset ring-violet-400"
       )}
       onDragOver={(e) => {
         e.preventDefault()
@@ -1488,17 +1488,17 @@ export function MusicPlayer() {
       {/* Loading splash while restoring the saved library */}
       {!tracksReady && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-background">
-          <Disc3 className="h-12 w-12 animate-spin-slow text-emerald-400" />
+          <Disc3 className="h-12 w-12 animate-spin-slow text-violet-500" />
           <p className="text-xs text-muted-foreground">Загрузка библиотеки…</p>
         </div>
       )}
 
       {/* Drag overlay hint */}
       {isDragOver && (
-        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-emerald-500/10 backdrop-blur-sm">
-          <div className="rounded-2xl border-2 border-dashed border-emerald-400 bg-background/80 px-10 py-8 text-center shadow-2xl">
-            <Upload className="mx-auto mb-2 h-8 w-8 text-emerald-400" />
-            <p className="text-sm font-medium text-emerald-500">
+        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-violet-500/10 backdrop-blur-sm">
+          <div className="rounded-2xl border-2 border-dashed border-violet-400 bg-background/80 px-10 py-8 text-center shadow-2xl">
+            <Upload className="mx-auto mb-2 h-8 w-8 text-violet-500" />
+            <p className="text-sm font-medium text-violet-500">
               Отпустите файлы или папку, чтобы добавить
             </p>
           </div>
@@ -1658,10 +1658,10 @@ export function MusicPlayer() {
                         resetVideoSize()
                       }
                     }}
-                    className="hidden group/handle w-2 cursor-col-resize touch-none items-center justify-center rounded-full bg-border/40 transition hover:bg-emerald-400/60 focus:bg-emerald-400 focus:outline-none sm:flex"
+                    className="hidden group/handle w-2 cursor-col-resize touch-none items-center justify-center rounded-full bg-border/40 transition hover:bg-violet-400/60 focus:bg-violet-400 focus:outline-none sm:flex"
                     title="Тяните, чтобы изменить размер. Двойной клик — сбросить"
                   >
-                    <div className="h-10 w-1 rounded-full bg-muted-foreground/40 transition group-hover/handle:bg-emerald-300" />
+                    <div className="h-10 w-1 rounded-full bg-muted-foreground/40 transition group-hover/handle:bg-violet-300" />
                   </div>
                 </div>
               ) : (
@@ -1688,8 +1688,8 @@ export function MusicPlayer() {
                   </div>
                   {isPlaying && (
                     <span className="absolute -right-1 -top-1 flex h-4 w-4">
-                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                      <span className="relative inline-flex h-4 w-4 rounded-full bg-emerald-500" />
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-75" />
+                      <span className="relative inline-flex h-4 w-4 rounded-full bg-violet-500" />
                     </span>
                   )}
                 </div>
@@ -1702,7 +1702,7 @@ export function MusicPlayer() {
                 // the title/controls don't touch the screen edge.
                 currentTrack?.isVideo ? "p-4 sm:p-0" : ""
               )}>
-                <p className="text-xs font-medium uppercase tracking-widest text-emerald-400 drop-shadow">
+                <p className="text-xs font-medium uppercase tracking-widest text-violet-500 drop-shadow">
                   {isLoading ? "Загрузка…" : isPlaying ? "Сейчас играет" : "Пауза"}
                 </p>
                 <h2 className="mt-1 truncate text-2xl font-bold tracking-tight drop-shadow-sm sm:text-3xl">
@@ -1751,7 +1751,7 @@ export function MusicPlayer() {
                   onClick={() => setShuffle((s) => !s)}
                   className={cn(
                     "h-9 w-9 text-foreground/80 hover:text-foreground",
-                    shuffle && "text-emerald-400 hover:text-emerald-300"
+                    shuffle && "text-violet-500 hover:text-violet-400"
                   )}
                   aria-pressed={shuffle}
                   title="Перемешать"
@@ -1764,7 +1764,7 @@ export function MusicPlayer() {
                   onClick={cycleRepeat}
                   className={cn(
                     "h-9 w-9 text-foreground/80 hover:text-foreground",
-                    repeatMode !== "off" && "text-emerald-400 hover:text-emerald-300"
+                    repeatMode !== "off" && "text-violet-500 hover:text-violet-400"
                   )}
                   title={repeatLabel}
                   aria-label={repeatLabel}
@@ -1792,7 +1792,7 @@ export function MusicPlayer() {
                   onClick={onPlayClick}
                   disabled={!tracksReady || !currentTrack?.url}
                   size="icon"
-                  className="h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-xl shadow-emerald-500/10 transition hover:scale-105 hover:bg-primary disabled:opacity-40 disabled:hover:scale-100"
+                  className="h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-xl shadow-violet-500/10 transition hover:scale-105 hover:bg-primary disabled:opacity-40 disabled:hover:scale-100"
                   aria-label={isPlaying ? "Пауза" : "Играть"}
                 >
                   {isPlaying ? (
@@ -1852,7 +1852,7 @@ export function MusicPlayer() {
           >
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div className="flex items-center gap-2">
-                <ListMusic className="h-4 w-4 text-emerald-400" />
+                <ListMusic className="h-4 w-4 text-violet-500" />
                 <h3 className="text-sm font-semibold">Плейлист</h3>
               </div>
               <div className="flex items-center gap-2">
@@ -1861,7 +1861,7 @@ export function MusicPlayer() {
                   <select
                     value={sortMode}
                     onChange={(e) => setSortMode(e.target.value as typeof sortMode)}
-                    className="h-7 rounded-md border border-border/50 bg-secondary/80 px-2 text-[11px] font-medium text-foreground/80 focus:border-emerald-400 focus:outline-none"
+                    className="h-7 rounded-md border border-border/50 bg-secondary/80 px-2 text-[11px] font-medium text-foreground/80 focus:border-violet-400 focus:outline-none"
                     title="Сортировка"
                   >
                     <option value="default">По умолчанию</option>
@@ -1942,7 +1942,7 @@ export function MusicPlayer() {
                         ? "Фильтр по названию…"
                         : "Введите песню/исполнителя и Enter…"
                     }
-                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-emerald-400 focus:outline-none"
+                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-violet-400 focus:outline-none"
                   />
                   {searchQuery && (
                     <button
@@ -1962,7 +1962,7 @@ export function MusicPlayer() {
                   <button
                     onClick={() => void runOnlineSearch()}
                     disabled={isSearching || !searchQuery.trim()}
-                    className="shrink-0 rounded-md bg-emerald-500 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-emerald-600 disabled:opacity-40"
+                    className="shrink-0 rounded-md bg-violet-500 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-violet-600 disabled:opacity-40"
                   >
                     {isSearching ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1985,7 +1985,7 @@ export function MusicPlayer() {
                       key={track.id}
                       className={cn(
                         "group flex w-full min-w-0 flex-col text-left transition-colors hover:bg-secondary",
-                        isCurrentTrack && "bg-emerald-500/10"
+                        isCurrentTrack && "bg-violet-500/10"
                       )}
                     >
                       <div className="flex w-full min-w-0 items-center gap-3 px-3 py-2.5">
@@ -2020,7 +2020,7 @@ export function MusicPlayer() {
                       <div className="min-w-0 flex-1">
                         <p className={cn(
                           "truncate text-sm font-medium",
-                          isCurrentTrack ? "text-emerald-500" : "text-foreground"
+                          isCurrentTrack ? "text-violet-500" : "text-foreground"
                         )}>
                           {track.title}
                         </p>
@@ -2029,7 +2029,7 @@ export function MusicPlayer() {
                         </p>
                       </div>
                       {isCurrentTrack && (
-                        <span className="shrink-0 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-500">
+                        <span className="shrink-0 rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-500">
                           {formatTime(progress)} / {formatTime(duration)}
                         </span>
                       )}
@@ -2047,8 +2047,8 @@ export function MusicPlayer() {
                         className={cn(
                           "shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition",
                           isInPlaylist
-                            ? "bg-emerald-500/10 text-emerald-500"
-                            : "bg-secondary text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-400"
+                            ? "bg-violet-500/10 text-violet-500"
+                            : "bg-secondary text-muted-foreground hover:bg-violet-500/10 hover:text-violet-500"
                         )}
                       >
                         {isInPlaylist ? "✓ В плейлисте" : "+ Добавить"}
@@ -2068,7 +2068,7 @@ export function MusicPlayer() {
                     <li className="border-t border-border p-3">
                       <button
                         onClick={addAllSearchResults}
-                        className="w-full rounded-md bg-emerald-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-600"
+                        className="w-full rounded-md bg-violet-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-violet-600"
                       >
                         Добавить все ({searchResults.length})
                       </button>
@@ -2086,7 +2086,7 @@ export function MusicPlayer() {
                         onClick={() => playIndex(realIdx)}
                         className={cn(
                           "group flex w-full min-w-0 items-center gap-3 px-3 py-2.5 text-left transition-colors",
-                          active ? "bg-emerald-500/10" : "hover:bg-secondary"
+                          active ? "bg-violet-500/10" : "hover:bg-secondary"
                         )}
                       >
                         <div
@@ -2121,7 +2121,7 @@ export function MusicPlayer() {
                           <p
                             className={cn(
                               "truncate text-sm font-medium",
-                              active ? "text-emerald-500" : "text-foreground"
+                              active ? "text-violet-500" : "text-foreground"
                             )}
                             title={track.title}
                           >
@@ -2214,7 +2214,7 @@ export function MusicPlayer() {
       <div aria-hidden className={cn("pointer-events-none fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border/50 bg-background/80 px-5 py-4 shadow-2xl backdrop-blur-md transition-opacity duration-200", volumePopup.visible ? "opacity-100" : "opacity-0")}>
         <div className="flex flex-col items-center gap-2">
           <VolumeIcon className="h-6 w-6 text-foreground" />
-          <div className="flex h-24 w-2 flex-col justify-end overflow-hidden rounded-full bg-secondary"><div className="w-full rounded-full bg-emerald-500 transition-[height] duration-75" style={{ height: `${Math.round(volumePopup.value * 100)}%` }} /></div>
+          <div className="flex h-24 w-2 flex-col justify-end overflow-hidden rounded-full bg-secondary"><div className="w-full rounded-full bg-violet-500 transition-[height] duration-75" style={{ height: `${Math.round(volumePopup.value * 100)}%` }} /></div>
           <span className="text-xs font-medium tabular-nums text-foreground">{Math.round(volumePopup.value * 100)}%</span>
         </div>
       </div>
@@ -2230,7 +2230,7 @@ export function MusicPlayer() {
       <footer className="relative z-10 mt-auto border-t border-border/60 backdrop-blur-xl" style={{ backgroundColor: currentTrack ? (theme === "dark" ? `${currentTrack.cover.to}66` : `${currentTrack.cover.to}55`) : undefined }}>
         <div className="relative z-10 mx-auto flex w-full max-w-[1600px] items-center justify-between px-4 py-2.5 text-xs text-foreground/80 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2 truncate">
-            <Disc3 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+            <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
             <span className="shrink-0 text-foreground/50">v1.6.0</span>
             <span className="truncate">
@@ -2276,7 +2276,7 @@ export function MusicPlayer() {
                     >
                       {desktopSave ? (
                         <span className="flex w-full cursor-pointer items-center gap-2">
-                          <Icon className="h-4 w-4 text-emerald-500" />
+                          <Icon className="h-4 w-4 text-violet-500" />
                           <span className="flex flex-col">
                             <span className="text-sm font-medium">{title}</span>
                             <span className="text-[11px] text-muted-foreground">{file}</span>
@@ -2284,7 +2284,7 @@ export function MusicPlayer() {
                         </span>
                       ) : (
                         <a href={`/api/download?file=${file}`} download={file} className="flex cursor-pointer items-center gap-2">
-                          <Icon className="h-4 w-4 text-emerald-500" />
+                          <Icon className="h-4 w-4 text-violet-500" />
                           <span className="flex flex-col">
                             <span className="text-sm font-medium">{title}</span>
                             <span className="text-[11px] text-muted-foreground">{file}</span>
