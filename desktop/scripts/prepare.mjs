@@ -20,16 +20,44 @@ const run = (cmd, cwd) => {
   execSync(cmd, { stdio: "inherit", cwd })
 }
 
-console.log("1/4  next build (production, standalone)")
-run("npx next build", root)
+// Non-ASCII characters in the project path are a known source of silent
+// failures on Windows (Turbopack / standalone output). Warn early.
+if (/[^\x20-\x7E]/.test(root)) {
+  console.log("ВНИМАНИЕ: путь к проекту содержит русские буквы или спецсимволы:")
+  console.log(`         ${root}`)
+  console.log("На Windows это может ломать сборку. Надёжный вариант — распаковать")
+  console.log("проект в путь без русских букв, например:  C:\\7-sonata")
+  console.log("(продолжаю попытку сборки — если упадёт, перенеси папку и запусти снова)\n")
+}
 
-const standalone = path.join(root, ".next", "standalone")
-if (!existsSync(path.join(standalone, "server.js"))) {
-  console.error("ERROR: .next/standalone/server.js not found — build failed?")
+// Builds Next.js and returns true when the standalone server was produced.
+function buildNext(extraArgs = "") {
+  run(`npx next build${extraArgs}`, root)
+  return existsSync(path.join(root, ".next", "standalone", "server.js"))
+}
+
+console.log("1/4  next build (production, standalone)")
+let built = buildNext()
+
+if (!built) {
+  console.log("\n  Standalone-сервер не создан. Так бывает на Windows: Turbopack не любит")
+  console.log("  русские буквы в пути, а файловая система без symlink-поддержки (exFAT/FAT32)")
+  console.log("  ломает standalone-копирование. Пробую ещё раз через webpack...\n")
+  rmSync(path.join(root, ".next"), { recursive: true, force: true })
+  built = buildNext(" --webpack")
+}
+
+if (!built) {
+  console.error("\nERROR: .next/standalone/server.js так и не создан после двух попыток.")
+  console.error("Что проверить:")
+  console.error("  1) Путь к проекту БЕЗ русских букв?  Например:  C:\\7-sonata")
+  console.error("  2) Диск NTFS? (exFAT/FAT32 не поддерживают symlinks — standalone не соберётся)")
+  console.error("  3) Свободное место на диске (нужно ~3 ГБ).")
   process.exit(1)
 }
 
 console.log("2/4  copying static assets into the standalone bundle")
+const standalone = path.join(root, ".next", "standalone")
 rmSync(path.join(standalone, ".next", "static"), { recursive: true, force: true })
 cpSync(path.join(root, ".next", "static"), path.join(standalone, ".next", "static"), { recursive: true })
 if (existsSync(path.join(root, "public"))) {
