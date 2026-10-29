@@ -6,7 +6,7 @@
 // ELECTRON_RUN_AS_NODE) and open it in a native window. This way every app
 // feature — MP3mn search, Rutube video proxy, quality selector, downloads —
 // works locally with no hosted backend.
-const { app, BrowserWindow, shell } = require("electron")
+const { app, BrowserWindow, shell, dialog } = require("electron")
 const { spawn } = require("node:child_process")
 const path = require("node:path")
 const fs = require("node:fs")
@@ -40,6 +40,48 @@ function log(msg) {
   if (f) { try { fs.appendFileSync(f, line + "\n") } catch {} }
 }
 
+function truncateLog() {
+  try {
+    const f = logFilePath()
+    if (f && fs.existsSync(f) && fs.statSync(f).size > 1000000) fs.writeFileSync(f, "")
+  } catch {}
+}
+
+// ---- GPU black-screen fallback ---------------------------------------------
+// Some Windows GPU drivers show the Electron window as pure black even when
+// the page has fully loaded (known Chromium/Electron issue on older drivers).
+// Recovery ladder:
+//   1. `7-Sonata.exe --disable-gpu` forces software rendering manually.
+//   2. GPU process crashed 3 times  -> relaunch with --disable-gpu.
+//   3. Page loaded but the visible frame is still black -> same relaunch.
+const launchedArgs = process.argv.slice(1)
+const gpuDisabled = launchedArgs.includes("--disable-gpu")
+let relaunchedForGpu = false
+let gpuCrashes = 0
+
+if (gpuDisabled) {
+  app.disableHardwareAcceleration()
+  app.commandLine.appendSwitch("disable-gpu")
+}
+
+function relaunchWithoutGpu(reason) {
+  if (relaunchedForGpu || gpuDisabled) return
+  relaunchedForGpu = true
+  log(`GPU problem (${reason}) — relaunching with --disable-gpu`)
+  app.relaunch({
+    args: [...launchedArgs.filter((a) => a !== "--disable-gpu"), "--disable-gpu"],
+  })
+  app.exit(0)
+}
+
+app.on("child-process-gone", (_event, details) => {
+  log(`child-process-gone: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`)
+  if (details.type === "GPU") {
+    gpuCrashes += 1
+    if (gpuCrashes >= 3) relaunchWithoutGpu("GPU process crashed 3 times")
+  }
+})
+
 // ---- free port discovery (so we never clash with anything on the PC) ----
 function getFreePort(start) {
   return new Promise((resolve) => {
@@ -66,7 +108,7 @@ function startServer(port) {
   if (!fs.existsSync(serverJs)) {
     log(`ERROR: embedded server not found at ${serverJs}`)
     log("Run `npm run build` in the repo root, then `npm run stage` in desktop/.")
-    return
+    return false
   }
   log(`starting embedded server: ${serverJs} (port ${port})`)
   serverProc = spawn(process.execPath, [serverJs], {
@@ -87,6 +129,7 @@ function startServer(port) {
     log(`embedded server exited (code=${code})`)
     serverProc = null
   })
+  return true
 }
 
 function killServer() {
@@ -96,7 +139,7 @@ function killServer() {
   }
 }
 
-function waitForServer(port, timeoutMs = 30000) {
+function waitForServer(port, timeoutMs = 45000) {
   const startedAt = Date.now()
   return new Promise((resolve) => {
     const ping = () => {
@@ -115,6 +158,30 @@ function waitForServer(port, timeoutMs = 30000) {
   })
 }
 
+// ---- black-window detection -------------------------------------------------
+// The app UI is dark, but it always renders readable text. A frame that is
+// 100% near-black pixels means the compositor never drew anything (broken
+// GPU acceleration), not that the UI is merely dark-themed.
+function isMostlyBlack(image) {
+  try {
+    const size = image.getSize()
+    if (!size.width || !size.height) return true
+    const bmp = image.toBitmap() // BGRA
+    const stride = 4 * 97 // sample every 97th pixel — plenty, and cheap
+    let sampled = 0
+    for (let i = 0; i + 3 < bmp.length; i += stride) {
+      const r = bmp[i + 2]
+      const g = bmp[i + 1]
+      const b = bmp[i]
+      sampled += 1
+      if (r > 16 || g > 16 || b > 16) return false
+    }
+    return sampled > 0
+  } catch {
+    return false
+  }
+}
+
 // ---- window ----
 async function createWindow() {
   let url
@@ -123,9 +190,27 @@ async function createWindow() {
     url = DEV_SERVER_URL
   } else {
     const port = await getFreePort(BASE_PORT)
-    startServer(port)
+    if (!startServer(port)) {
+      dialog.showErrorBox(
+        "7-Sonata: встроенный сервер не найден",
+        `Не найден файл:\n${path.join(serverDir(), "server.js")}\n\n` +
+          "Похоже, сборка повреждена. Соберите заново (npm run desktop:win)\n" +
+          `или скачайте архив с релиза.\n\nЛог: ${logFilePath() || "?"}`,
+      )
+      app.quit()
+      return
+    }
     const ok = await waitForServer(port)
-    if (!ok) log("WARNING: embedded server did not answer in time, opening window anyway")
+    if (!ok) {
+      log("WARNING: embedded server did not answer in time, opening window anyway")
+      dialog.showErrorBox(
+        "7-Sonata: сервер не отвечает",
+        "Встроенный сервер не ответил за 45 секунд.\n\n" +
+          "Чаще всего его блокирует антивирус (Windows Defender, Kaspersky и др.).\n" +
+          "Добавьте 7-Sonata в исключения антивируса и запустите снова.\n\n" +
+          `Лог: ${logFilePath() || "?"}`,
+      )
+    }
     url = `http://127.0.0.1:${port}/`
   }
 
@@ -151,6 +236,20 @@ async function createWindow() {
 
   mainWindow.once("ready-to-show", () => mainWindow.show())
 
+  // Diagnostics: anything that could leave the window dark gets logged.
+  mainWindow.webContents.on("did-finish-load", () => log("page did-finish-load"))
+  mainWindow.webContents.on("did-fail-load", (_e, code, desc, u, isMain) => {
+    if (!isMain) return
+    log(`did-fail-load: code=${code} desc=${desc} url=${u}`)
+    dialog.showErrorBox(
+      "7-Sonata: не удалось загрузить интерфейс",
+      `Код ${code} — ${desc}\n\nЛог: ${logFilePath() || "?"}`,
+    )
+  })
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    log(`renderer gone: reason=${details.reason} exitCode=${details.exitCode}`)
+  })
+
   // External links (e.g. "Открыть на Rutube") go to the real browser.
   mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
     if (/^https?:/i.test(target)) shell.openExternal(target)
@@ -158,8 +257,32 @@ async function createWindow() {
   })
 
   mainWindow.on("closed", () => { mainWindow = null })
+
   log(`loading ${url}`)
   try { await mainWindow.loadURL(url) } catch (e) { log(`loadURL failed: ${e?.message || e}`) }
+
+  // Safety net: never leave the user with an invisible window.
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      log("window still hidden 10 s after load — showing anyway")
+      mainWindow.show()
+    }
+  }, 10000)
+
+  // Black-window auto-heal: page reports loaded, but the visible frame is
+  // still pure black a few seconds later -> restart once in software mode.
+  if (!DEV_SERVER_URL && !gpuDisabled) {
+    setTimeout(async () => {
+      try {
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        const image = await mainWindow.webContents.capturePage()
+        if (isMostlyBlack(image)) relaunchWithoutGpu("screen stayed black after load")
+        else log("black-screen check passed: content rendered")
+      } catch (e) {
+        log(`black-screen check skipped: ${e?.message || e}`)
+      }
+    }, 7000)
+  }
 }
 
 // ---- lifecycle ----
@@ -173,7 +296,16 @@ if (!gotLock) {
       mainWindow.focus()
     }
   })
-  app.whenReady().then(createWindow).catch((e) => log(`fatal: ${e?.stack || e}`))
+  app.whenReady().then(async () => {
+    truncateLog()
+    log(`--- 7-Sonata start: v${app.getVersion()} packaged=${app.isPackaged}`)
+    log(`execPath=${process.execPath}`)
+    log(`resourcesPath=${process.resourcesPath}`)
+    log(`userData=${app.getPath("userData")}`)
+    if (gpuDisabled) log("GPU disabled: safe mode (--disable-gpu)")
+    try { log(`gpu status: ${JSON.stringify(app.getGPUFeatureStatus())}`) } catch {}
+    await createWindow()
+  }).catch((e) => log(`fatal: ${e?.stack || e}`))
 }
 
 app.on("window-all-closed", () => {
@@ -185,3 +317,4 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => { quitting = true; killServer() })
 
 process.on("exit", killServer)
+process.on("uncaughtException", (e) => log(`uncaughtException: ${e?.stack || e}`))
