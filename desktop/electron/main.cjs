@@ -18,6 +18,13 @@ const net = require("node:net")
 const DEV_SERVER_URL = process.env.SONATA_DEV_URL || ""
 const BASE_PORT = 37654
 
+// Media app: keep the renderer alive when the window is minimized.
+// On Windows Chromium marks a minimized window as "occluded" -> the page
+// flips to hidden, the video pipeline stalls and Picture-in-Picture freezes
+// until the window is restored. Disabling the occlusion tracker keeps the
+// page "visible" while minimized, so playback (and PiP) just continues.
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion")
+
 let serverProc = null
 let mainWindow = null
 let quitting = false
@@ -230,6 +237,9 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // No timer/rAF throttling when the window is hidden or minimized —
+      // progress bars, HLS and PiP video must keep running in the background.
+      backgroundThrottling: false,
       // The player starts tracks programmatically (autoplay next, prefetched
       // search previews) — do not let Chromium block playback.
       autoplayPolicy: "no-user-gesture-required",

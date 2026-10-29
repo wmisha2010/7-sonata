@@ -1228,6 +1228,11 @@ export function MusicPlayer() {
   const enterBgFallback = useCallback(() => {
     if (bgFallbackRef.current) return
     if (typeof document !== "undefined" && !document.hidden) return // only when actually hidden
+    // Picture-in-Picture: the <video> is still fully visible — in its own
+    // always-on-top window — and Chromium keeps it playing while the opener
+    // page is hidden. Pausing it here would freeze the PiP frame (the exact
+    // "minimized with PiP -> playback stops" report), so leave it running.
+    if (typeof document !== "undefined" && document.pictureInPictureElement) return
     const L = latestRef.current
     const t = L.currentTrack
     if (!t?.isVideo || !L.isPlaying) return
