@@ -36,6 +36,7 @@ import {
   FolderArchive,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { APP_VERSION } from "@/lib/version"
 import { formatTime } from "@/lib/format"
 import { type Track } from "@/lib/tracks"
 import { extractAudioMeta } from "@/lib/metadata"
@@ -3079,7 +3080,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.8.3</span>
+            <span className="shrink-0 text-foreground/50">v{APP_VERSION}</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`
