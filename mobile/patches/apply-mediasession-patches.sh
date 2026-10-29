@@ -1,50 +1,170 @@
 #!/bin/bash
-# Pre-build verification for 7-Sonata mobile.
+# Pre-build media-session patcher + guards for 7-Sonata mobile.
 #
 # IMPORTANT HISTORY (do not regress):
-#   v1.6.0 (known-good, user-verified) used the ORIGINAL unpatched
-#   @jofr/capacitor-media-session@4.0.0 plugin, an EMPTY MainActivity and a
-#   bare AndroidManifest. The MediaSessionService / MediaButtonReceiver and
-#   the FOREGROUND_SERVICE* / POST_NOTIFICATIONS / WAKE_LOCK permissions come
-#   from the plugin's OWN library manifest via the Gradle manifest merger.
-#   Our later "hardening" (native patches 1-5, JS playpause action +
-#   visibilitychange/3s retries, manual <service> in the app manifest,
-#   onKeyDown media-key interception, server.androidScheme=http) BROKE the
-#   notification shade on real devices. All of it was reverted.
+#   v1.6.0 (user-verified) used the ORIGINAL @jofr/capacitor-media-session
+#   plugin with an EMPTY MainActivity and a bare AndroidManifest. Deep JS
+#   "hardening" (playpause action, visibilitychange/3s retries, manual
+#   <service> in the app manifest, androidScheme=http) BROKE the shade on
+#   real devices and was fully reverted. The service/receiver/permissions
+#   must keep coming from the plugin's OWN library manifest via the merger.
 #
-# This script now only GUARDS the known-good state:
-#   1. the plugin must be the pristine npm original (no SonataMs markers),
-#   2. the plugin's library manifest must still declare the service,
-#   3. the app manifest must stay bare (no hand-added <service>).
+# v1.7.3 — two MINIMAL, surgical native fixes (proven root causes):
+#   FIX 1 (playpause): PlaybackStateCompat.toKeyCode() accepts only a SINGLE
+#        action. The plugin built play/pause notification PendingIntents with
+#        the combined flag (ACTION_PLAY_PAUSE | ACTION_PLAY) => toKeyCode
+#        returned KEYCODE_UNKNOWN => buildMediaButtonPendingIntent returned
+#        null => the play/pause buttons in the shade rendered but were DEAD.
+#        Fix: single ACTION_PLAY / ACTION_PAUSE (KEYCODE_MEDIA_PLAY/PAUSE ->
+#        onPlay()/onPause()). Verified on the compiled bytecode: the
+#        PendingIntents are built with long 4 / long 2 constants.
+#   FIX 2 (artwork): the plugin's urlToBitmap fetched covers with a bare
+#        HttpURLConnection (no UA, NO timeouts) on the single Capacitor
+#        plugin thread, and setMetadata propagated any failure — killing the
+#        whole metadata update and stalling every queued media-session call.
+#        Fix: browser UA + 10s timeouts + never throw + clear stale covers.
+#   The JS side additionally pre-resolves artwork to base64 data URLs via
+#   CapacitorHttp (resolveArtworkSrc in music-player.tsx), so the native
+#   fetch below is only a fallback path.
 set -e
 cd "$(dirname "$0")/.."
 
-P="node_modules/@jofr/capacitor-media-session"
-PJ="$P/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin"
+PJ="node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin"
 
-if rg -q "SonataMs|registeredActions" "$PJ" 2>/dev/null; then
-  echo "GUARD FAILED: plugin is patched! Restore the pristine npm package:" >&2
-  echo "  rm -rf $P && bun install  (or copy files from the npm tarball)" >&2
-  exit 1
-else
-  echo "Guard 1 OK: plugin is the pristine unpatched original."
-fi
+python3 - "$PJ" <<'PYEOF'
+import sys, pathlib
 
-PM="$P/android/src/main/AndroidManifest.xml"
-if rg -q "MediaSessionService" "$PM" && rg -q "MediaButtonReceiver" "$PM"; then
-  echo "Guard 2 OK: plugin library manifest declares service + receiver."
-else
-  echo "GUARD FAILED: plugin library manifest lost service/receiver!" >&2
-  exit 1
-fi
+pj = pathlib.Path(sys.argv[1])
+svc = pj / "MediaSessionService.java"
+plg = pj / "MediaSessionPlugin.java"
 
+# ---------- FIX 1: play/pause notification PendingIntents ----------
+PLAY_OLD = 'MediaButtonReceiver.buildMediaButtonPendingIntent(this, (PlaybackStateCompat.ACTION_PLAY_PAUSE | PlaybackStateCompat.ACTION_PLAY))'
+PAUSE_OLD = 'MediaButtonReceiver.buildMediaButtonPendingIntent(this, (PlaybackStateCompat.ACTION_PLAY_PAUSE | PlaybackStateCompat.ACTION_PAUSE))'
+PLAY_NEW = 'MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PLAY)  // SonataFix(playpause): single action, combined flag resolved to KEYCODE_UNKNOWN and a null (dead) PendingIntent'
+PAUSE_NEW = 'MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PAUSE)  // SonataFix(playpause): single action, combined flag resolved to KEYCODE_UNKNOWN and a null (dead) PendingIntent'
+
+s = svc.read_text()
+changed1 = False
+if PLAY_OLD in s:
+    s = s.replace(PLAY_OLD, PLAY_NEW)
+    changed1 = True
+if PAUSE_OLD in s:
+    s = s.replace(PAUSE_OLD, PAUSE_NEW)
+    changed1 = True
+if PLAY_OLD in s or PAUSE_OLD in s:
+    print("GUARD FAILED: could not fully patch play/pause PendingIntents", file=sys.stderr)
+    sys.exit(1)
+if "SonataFix(playpause)" not in s:
+    print("GUARD FAILED: playpause fix marker missing after patch", file=sys.stderr)
+    sys.exit(1)
+svc.write_text(s)
+print("FIX 1 (playpause):", "applied" if changed1 else "already present")
+
+# ---------- FIX 2: robust artwork loading ----------
+META_OLD = '''        final JSArray artworkArray = call.getArray("artwork");
+        final List<JSONObject> artworkList = artworkArray.toList();
+        for (JSONObject artwork : artworkList) {
+            String src = artwork.getString("src");
+            if (src != null) {
+                this.artwork = urlToBitmap(src);
+            }
+        }
+'''
+META_NEW = '''        // SonataFix(artwork): never let artwork failures kill the metadata
+        // update (the plugin thread is single-threaded — a throw or a hang
+        // here stalls every queued media-session call), and clear stale
+        // covers when a track ships without artwork.
+        final JSArray artworkArray = call.getArray("artwork");
+        if (artworkArray != null) {
+            Bitmap loadedArtwork = null;
+            try {
+                final List<JSONObject> artworkList = artworkArray.toList();
+                for (JSONObject artwork : artworkList) {
+                    String src = artwork.getString("src");
+                    if (src == null || src.isEmpty()) continue;
+                    Bitmap bmp = urlToBitmap(src);
+                    if (bmp != null) { loadedArtwork = bmp; break; }
+                }
+            } catch (Exception artEx) {
+                Log.w(TAG, "Artwork load failed: " + artEx);
+            }
+            this.artwork = loadedArtwork;
+        }
+'''
+
+FETCH_OLD = '''    private Bitmap urlToBitmap(String url) throws IOException {
+        final boolean blobUrl = url.startsWith("blob:");
+        if (blobUrl) {
+            Log.i(TAG, "Converting Blob URLs to Bitmap for media artwork is not yet supported");
+        }
+
+        final boolean httpUrl = url.startsWith("http");
+        if (httpUrl) {
+            HttpURLConnection connection = (HttpURLConnection) (new URL(url)).openConnection();
+            connection.setDoInput(true);
+            connection.connect();
+            InputStream inputStream = connection.getInputStream();
+            return BitmapFactory.decodeStream(inputStream);
+        }
+'''
+FETCH_NEW = '''    private Bitmap urlToBitmap(String url) {
+        final boolean blobUrl = url.startsWith("blob:");
+        if (blobUrl) {
+            Log.i(TAG, "Converting Blob URLs to Bitmap for media artwork is not yet supported");
+        }
+
+        final boolean httpUrl = url.startsWith("http");
+        if (httpUrl) {
+            // SonataFix(artwork): browser UA + hard timeouts. The default
+            // HttpURLConnection has NO read/connect timeout and a Dalvik UA
+            // that some CDNs reject; a stall here would freeze the single
+            // Capacitor plugin thread.
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) (new URL(url)).openConnection();
+                connection.setDoInput(true);
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(10000);
+                connection.setInstanceFollowRedirects(true);
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+                connection.connect();
+                InputStream inputStream = connection.getInputStream();
+                return BitmapFactory.decodeStream(inputStream);
+            } catch (IOException fetchEx) {
+                Log.w(TAG, "Artwork fetch failed: " + fetchEx);
+                return null;
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }
+'''
+
+p = plg.read_text()
+changed2 = False
+if META_OLD in p:
+    p = p.replace(META_OLD, META_NEW)
+    changed2 = True
+if FETCH_OLD in p:
+    p = p.replace(FETCH_OLD, FETCH_NEW)
+    changed2 = True
+if META_OLD in p or FETCH_OLD in p:
+    print("GUARD FAILED: could not fully patch artwork loading", file=sys.stderr)
+    sys.exit(1)
+if "SonataFix(artwork)" not in p:
+    print("GUARD FAILED: artwork fix marker missing after patch", file=sys.stderr)
+    sys.exit(1)
+plg.write_text(p)
+print("FIX 2 (artwork):", "applied" if changed2 else "already present")
+PYEOF
+
+# Guard: the app manifest must stay bare — the MediaSessionService and
+# MediaButtonReceiver must keep coming from the plugin's library manifest.
 AM="android/app/src/main/AndroidManifest.xml"
-if rg -q "MediaSessionService" "$AM"; then
-  echo "GUARD FAILED: app manifest has a hand-added <service> — revert it to" >&2
-  echo "  the bare 9965e95 state; the merger adds it from the plugin AAR." >&2
+if grep -q "MediaSessionService" "$AM"; then
+  echo "GUARD FAILED: app manifest has a hand-added <service> — revert it;" >&2
+  echo "  the merger adds the service from the plugin library manifest." >&2
   exit 1
-else
-  echo "Guard 3 OK: app manifest is bare (service comes from the AAR merger)."
 fi
-
-echo "All guards passed — known-good v1.6.0 configuration."
+echo "Guard OK: app manifest is bare (service comes from the plugin AAR merger)."
+echo "All media-session patches applied + guards passed."

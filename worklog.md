@@ -210,3 +210,21 @@ Work Log:
 Stage Summary:
 - If the shade STILL shows no buttons with v1.7.2 footer and NO MS:ERR marker → the failure is inside the native plugin callback layer (hasActionHandler/dangling) → next step: patch plugin Java directly
 - If footer shows MS:ERR (msg) → the message names the rejecting layer exactly
+
+---
+Task ID: 13
+Agent: Z.ai Code (main)
+Task: v1.7.3 — user reports: shade card has NO cover art and the play/pause button in the shade does not respond to taps (next/prev + seek in the shade and the whole main UI work).
+
+Work Log:
+- Root cause 1 (PROVEN on androidx.media 1.7.0 sources): MediaSessionService builds the play/pause notification PendingIntents with a COMBINED flag — buildMediaButtonPendingIntent(this, ACTION_PLAY_PAUSE | ACTION_PLAY). PlaybackStateCompat.toKeyCode() compares with EXACT equality, returns KEYCODE_UNKNOWN for the combo, buildMediaButtonPendingIntent logs "Cannot build a media button pending intent" and returns NULL → the play/pause buttons rendered but were dead. next/prev/seek used single actions → worked. Fix: single ACTION_PLAY / ACTION_PAUSE → KEYCODE_MEDIA_PLAY/PAUSE → onPlay()/onPause(). Verified in compiled bytecode: PendingIntents now built with long 4 / long 2.
+- Root cause 2: v1.7.2 stripped ALL remote http artwork from native setMetadata (NetworkOnMainThread workaround) → remote-search tracks NEVER had a shade cover. Proper fix: JS pre-resolves the cover via CapacitorHttp (arraybuffer→base64 data URL, cached per URL, 10s timeouts, browser UA) and hands the plugin a data: URL — the native side only decodes base64, zero network. safeArt http-strip kept as safety net; track-change race guarded by url token.
+- Native hardening (patches/apply-mediasession-patches.sh now APPLIES + verifies instead of only guarding): urlToBitmap gets browser UA + 10s connect/read timeouts + never throws; setMetadata wraps artwork in try/catch so title/artist ALWAYS apply and stale covers are cleared when a track has none. Plugin thread is single-threaded — a hang there stalled every queued media-session call.
+- Rebuild env was wiped (SDK/JDK gone): reinstalled cmdline-tools + platforms;android-36 + build-tools;36.0.0 + Temurin JDK21 (org.gradle.java.home in gradle.properties is a LOCAL machine tweak, not committed; init.mirrors.gradle recreated and committed)
+- APK 7.98MB verified: badging versionCode 12 / versionName 1.7.3, patched UA string in dex, javap constants 4/2 on buildMediaButtonPendingIntent
+- Release v1.7.3 created on GitHub with 7-Sonata-1.7.3-android.apk; git commit pushed
+
+Stage Summary:
+- play/pause in the shade: fixed at the PendingIntent level (was a plugin bug since v1.6.x — combined toKeyCode flag); Bluetooth/wired PLAY/PAUSE/PLAY_PAUSE keycodes all map to onPlay/onPause handlers
+- shade cover: fixed via CapacitorHttp→base64 data URLs (works for mp3mn + rutube thumbnails + local data URLs); stale-cover clearing added
+- if cover still missing on some CDNs → check footer MS:ERR marker; CapacitorHttp failure falls back to empty artwork (never breaks metadata)

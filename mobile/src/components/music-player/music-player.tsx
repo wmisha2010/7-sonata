@@ -104,11 +104,13 @@ const mediaSessionApi = {
   setMetadata(o: { title: string; artist: string; album: string; artwork: any[] }) {
     const n = nativeMs()
     if (!n) { markMs("web"); msFallback.metadata(o); return }
-    // The plugin decodes artwork with HttpURLConnection on the ANDROID MAIN
-    // thread — remote http(s) covers would throw NetworkOnMainThreadException
-    // and REJECT the whole call (title/artist never reach the session card).
-    // Strip remote URLs for the native call; local blob:/data: artwork still
-    // passes through.
+    // v1.7.3: call sites pre-resolve remote covers to base64 data URLs via
+    // CapacitorHttp (see resolveArtworkSrc below), so the plugin only ever
+    // decodes data: artwork and never touches the network itself. The http
+    // strip below stays as a safety net: remote http(s) URLs would make the
+    // plugin's own HttpURLConnection fetch stall/throw on the single
+    // Capacitor plugin thread, rejecting the whole call (title/artist never
+    // reach the session card). Local blob:/data: artwork passes through.
     const safeArt = (o.artwork || []).filter((a: any) => a && typeof a.src === "string" && !a.src.startsWith("http"))
     n.setMetadata({ ...o, artwork: safeArt }).then(() => markMs("native")).catch((e) => { markMs("err", msErrMsg(e)); msFallback.metadata(o) })
   },
@@ -985,7 +987,49 @@ export function MusicPlayer() {
   const latestRef = useRef({ currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef })
   useEffect(() => { latestRef.current = { currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef } })
   const getActiveMedia = useCallback(() => { const { currentTrack, audioRef, videoRef } = latestRef.current; if (currentTrack?.isVideo) return videoRef.current; return audioRef.current }, [])
-  const updateMediaSession = useCallback(() => { const t = currentTrack; if (!t) { mediaSessionApi.setMetadata({ title: "", artist: "", album: "", artwork: [] }); return } mediaSessionApi.setMetadata({ title: t.title, artist: t.artist, album: t.album || "7-Sonata", artwork: t.coverImage ? [{ src: t.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: t.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }) }, [currentTrack])
+  // v1.7.3: hand the cover to the media-session plugin as a base64 data URL.
+  // The plugin's own HttpURLConnection fetch has no browser headers and no
+  // timeout, and it runs on the single Capacitor plugin thread — if it
+  // stalls, every media-session call queued behind it stalls too (playback
+  // state, position, handlers). CapacitorHttp is proven to reach both the
+  // mp3mn and rutube CDNs on-device, so we fetch the bytes there and let the
+  // plugin just decode base64.
+  const artworkCacheRef = useRef(new Map<string, string>())
+  const msTrackTokenRef = useRef("")
+  const resolveArtworkSrc = useCallback(async (src?: string): Promise<string> => {
+    if (!src) return ""
+    if (src.startsWith("data:")) return src
+    const cached = artworkCacheRef.current.get(src)
+    if (cached) return cached
+    try {
+      if (msIsNative()) {
+        const { CapacitorHttp } = await import("@capacitor/core")
+        const res = await CapacitorHttp.get({
+          url: src,
+          responseType: "arraybuffer",
+          connectTimeout: 10000,
+          readTimeout: 10000,
+          headers: { "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36" },
+        })
+        const b64 = typeof res.data === "string" ? res.data : ""
+        if (b64.length > 100) {
+          const mime = String(res.headers?.["content-type"] || "image/jpeg").split(";")[0].trim() || "image/jpeg"
+          const dataUrl = `data:${mime};base64,${b64}`
+          artworkCacheRef.current.set(src, dataUrl)
+          return dataUrl
+        }
+      }
+    } catch {}
+    return "" // native fetch of raw http URLs is stripped by safeArt anyway
+  }, [])
+  const sendMediaMetadata = useCallback(async (t: typeof currentTrack) => {
+    if (!t) { msTrackTokenRef.current = ""; mediaSessionApi.setMetadata({ title: "", artist: "", album: "", artwork: [] }); return }
+    msTrackTokenRef.current = t.url
+    const art = await resolveArtworkSrc(t.coverImage)
+    if (msTrackTokenRef.current !== t.url) return
+    mediaSessionApi.setMetadata({ title: t.title, artist: t.artist, album: t.album || "7-Sonata", artwork: art ? [{ src: art, sizes: "512x512", type: "image/jpeg" }] : [] })
+  }, [resolveArtworkSrc])
+  const updateMediaSession = useCallback(() => { void sendMediaMetadata(currentTrack) }, [sendMediaMetadata, currentTrack])
   // Register MediaSession action handlers — kept intentionally simple: the
   // original (unpatched) @jofr/capacitor-media-session plugin handled the
   // shade/lock-screen card correctly in v1.6.0. The "hardening" added later
@@ -1034,7 +1078,7 @@ export function MusicPlayer() {
   const [msDiag, setMsDiag] = useState<{ mode: MediaSessionMode; err: string }>({ mode: "web", err: "" })
   useEffect(() => { onMediaSessionStatus((mode, err) => setMsDiag({ mode, err })) }, [])
   useEffect(() => { mediaSessionApi.setPlaybackState(isPlaying ? "playing" : "paused") }, [isPlaying, currentTrack?.url])
-  useEffect(() => { if (!currentTrack?.url) return; mediaSessionApi.setMetadata({ title: currentTrack.title, artist: currentTrack.artist, album: currentTrack.album || "7-Sonata", artwork: currentTrack.coverImage ? [{ src: currentTrack.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: currentTrack.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }); if (isPlaying) mediaSessionApi.setPlaybackState("playing") }, [currentTrack?.url])
+  useEffect(() => { if (!currentTrack?.url) return; void sendMediaMetadata(currentTrack); if (isPlaying) mediaSessionApi.setPlaybackState("playing") }, [currentTrack?.url, sendMediaMetadata])
   useEffect(() => { const m = currentTrack?.isVideo ? videoRef.current : audioRef.current; if (!m || !Number.isFinite(m.duration)) return; try { mediaSessionApi.setPositionState({ duration: m.duration, position: m.currentTime, playbackRate: 1 }) } catch {} }, [progress, currentTrack?.isVideo])
   // Wheel volume
   const [volumePopup, setVolumePopup] = useState<{ visible: boolean; value: number }>({ visible: false, value: 0 })
