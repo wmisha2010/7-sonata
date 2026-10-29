@@ -184,6 +184,12 @@ export function MusicPlayer() {
   // tracks, or search Rutube for video clips — both online modes add
   // streaming tracks to the playlist.
   const [searchMode, setSearchMode] = useState<"library" | "online" | "video">("library")
+  // v1.7.6: hide the Rutube "Видео" search tab in the native Android build.
+  // Video *playback* for tracks already in the library still works (the
+  // <video> element and the bg-audio fallback stay intact); we only remove
+  // the entry point for *finding new clips* on the phone, where heavy
+  // Rutube segments stall on mobile data even with the v1.7.5 proxy cache.
+  const msHideVideoTab = msIsNative()
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState<Track[]>([])
   const [isSearching, setIsSearching] = useState(false)
@@ -1486,6 +1492,45 @@ export function MusicPlayer() {
       stopBgAudio()
     }
   }, [enterBgFallback, exitBgFallback, stopBgAudio])
+
+  // v1.7.6: hardware Back button on Android must CLOSE the app (not just
+  // minimize). The WebView's default back behavior is "navigate history",
+  // which does nothing on a single-page app — so the button felt dead and
+  // the foreground MediaSessionService kept the process alive. We:
+  //  1) stop media + tear down the bg-audio fallback (releases the audio
+  //     focus and the foreground notification),
+  //  2) call App.exitApp() — Android then removes the task and the OS
+  //     reclaims the process. Combined with onTaskRemoved → killProcess
+  //     in MediaSessionService, the app fully exits (no zombie service).
+  useEffect(() => {
+    if (!msIsNative()) return
+    let sub: { remove: () => void } | null = null
+    let cancelled = false
+    import("@capacitor/app")
+      .then(({ App }) =>
+        App.addListener("backButton", () => {
+          // Stop any playing media so the foreground service can drop.
+          try {
+            const L = latestRef.current
+            const a = L.audioRef.current
+            if (a) { try { a.pause() } catch {} }
+            const v = L.videoRef.current
+            if (v) { try { v.pause() } catch {} }
+            stopBgAudio()
+          } catch {}
+          void App.exitApp()
+        })
+      )
+      .then((s) => {
+        if (cancelled) (s as unknown as { remove: () => void })?.remove?.()
+        else sub = s as unknown as { remove: () => void }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      sub?.remove?.()
+    }
+  }, [stopBgAudio])
 
   // Track switched while hidden (shade next/prev): tear down the old bg audio
   // and, if the new track is a video, re-engage the fallback once its HLS
@@ -2828,6 +2873,7 @@ export function MusicPlayer() {
                 >
                   Онлайн (MP3mn)
                 </button>
+                {!msHideVideoTab && (
                 <button
                   onClick={() => setSearchMode("video")}
                   className={cn(
@@ -2839,6 +2885,7 @@ export function MusicPlayer() {
                 >
                   Видео
                 </button>
+                )}
               </div>
               <div className="flex gap-2">
                 <div className="relative flex-1">
@@ -3153,7 +3200,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.8.0</span>
+            <span className="shrink-0 text-foreground/50">v1.8.1</span>
             {msDiag.mode === "err" && (
               <span className="shrink-0 text-amber-500 dark:text-amber-400" title={`MediaSession: ${msDiag.err}`}>
                 MS:ERR ({msDiag.err})
