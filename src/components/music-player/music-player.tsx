@@ -2223,7 +2223,9 @@ export function MusicPlayer() {
 
       {/* Main — no top header, fills the full height */}
       <main className={cn(
-        "relative z-10 mx-auto flex w-full max-w-[1600px] min-w-0 flex-1 flex-col gap-6 px-4 pt-4 pb-2 sm:px-6 lg:flex-row lg:px-8",
+        // v1.8.3: no max-width cap — when the window is maximized the player,
+        // video and playlist all stretch to fill the screen edge-to-edge.
+        "relative z-10 flex w-full min-w-0 flex-1 flex-col gap-6 px-4 pt-4 pb-2 sm:px-6 lg:flex-row lg:px-8",
         // On mobile + video mode, remove horizontal padding so the video
         // spans the full screen width (edge-to-edge).
         currentTrack?.isVideo ? "px-0 sm:px-6" : "px-4"
@@ -2242,9 +2244,13 @@ export function MusicPlayer() {
             currentTrack?.isVideo
               ? ({
                   flex: "0 0 auto",
-                  ["--video-width" as string]: videoWidth
-                    ? `${videoWidth}px`
-                    : "50%",
+                  // v1.8.3: with the playlist collapsed the video section
+                  // expands to 100% — no dead space where the playlist was.
+                  ["--video-width" as string]: playlistCollapsed
+                    ? "100%"
+                    : videoWidth
+                      ? `${videoWidth}px`
+                      : "50%",
                 } as React.CSSProperties)
               : { flex: "1 1 0%" }
           }
@@ -2331,7 +2337,13 @@ export function MusicPlayer() {
                       // object-contain keeps the video's aspect ratio — vertical
                       // videos get pillarboxed (black bars on the sides),
                       // landscape fills the frame. Desktop: fill container.
-                      className="mx-auto block h-[40vh] max-h-[60vh] w-full max-w-full object-contain"
+                      // v1.8.3: on desktop (lg+) the height now follows the
+                      // 16:9 aspect of the container width (capped at 60vh),
+                      // so the video grows/shrinks together with the section
+                      // (maximize, playlist collapse, drag-resize). Mobile
+                      // keeps the fixed 40vh box.
+                      className="mx-auto block h-[40vh] max-h-[60vh] w-full max-w-full object-contain lg:h-auto"
+                      style={{ aspectRatio: "16 / 9" }}
                       controls
                       playsInline
                       onTimeUpdate={() => {
@@ -2389,8 +2401,10 @@ export function MusicPlayer() {
                     )}
                   </div>
                   {/* Vertical resize handle — hidden on mobile (no room),
-                      shown on sm+ so desktop users can drag to resize. */}
-                  <div
+                      shown on sm+ so desktop users can drag to resize.
+                      v1.8.3: also hidden while the playlist is collapsed —
+                      the video already fills the whole row. */}
+                  {!playlistCollapsed && (<div
                     role="separator"
                     aria-orientation="vertical"
                     aria-label="Изменить размер видео"
@@ -2423,7 +2437,7 @@ export function MusicPlayer() {
                     title="Тяните, чтобы изменить размер. Двойной клик — сбросить"
                   >
                     <div className="h-10 w-1 rounded-full bg-muted-foreground/40 transition group-hover/handle:bg-violet-300 dark:group-hover/handle:bg-emerald-300" />
-                  </div>
+                  </div>)}
                 </div>
               ) : (
                 <div className="relative shrink-0">
@@ -2602,8 +2616,11 @@ export function MusicPlayer() {
         {/* Playlist — takes the remaining space after the video section.
             Can be collapsed via the header toggle (useful on mobile / narrow
             screens so the player gets the full width). */}
+        {/* v1.8.3: no max-width cap — the panel takes ALL the remaining
+            space after the player/video section (no dead gap on the right
+            on maximized windows). */}
         {!playlistCollapsed && (
-        <aside className="flex w-full min-w-0 flex-col overflow-hidden lg:min-w-[200px] lg:max-w-[400px]" style={{ flex: "1 1 0%" }}>
+        <aside className="flex w-full min-w-0 flex-col overflow-hidden lg:min-w-[200px]" style={{ flex: "1 1 0%" }}>
           <div className="flex h-full flex-col overflow-hidden rounded-3xl border border-border/50 bg-card/60 backdrop-blur-2xl"
                style={{
                  backgroundColor: currentTrack
@@ -2754,7 +2771,10 @@ export function MusicPlayer() {
                 )}
               </div>
             </div>
-            <div className="custom-scroll flex-1 overflow-y-auto overflow-x-hidden" style={{maxHeight: "calc(100vh - 360px)"}}>
+            {/* v1.8.3: on desktop the list fills the panel's real height
+                (flex-1 + min-h-0) instead of a magic 100vh offset; mobile
+                keeps the viewport-based cap. */}
+            <div className="custom-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden max-h-[calc(100vh_-_360px)] lg:max-h-none">
               {searchMode !== "library" ? (
                 <ul className="divide-y divide-border">
                   {searchResults.map((track) => {
@@ -3009,11 +3029,11 @@ export function MusicPlayer() {
 
       {/* Footer — app name, version, current track, and "show playlist" button */}
       <footer className="relative z-10 mt-auto border-t border-border/60 backdrop-blur-xl" style={{ backgroundColor: currentTrack ? (theme === "dark" ? `${currentTrack.cover.to}66` : `${currentTrack.cover.to}55`) : undefined }}>
-        <div className="relative z-10 mx-auto flex w-full max-w-[1600px] items-center justify-between px-4 py-2.5 text-xs text-foreground/80 sm:px-6 lg:px-8">
+        <div className="relative z-10 flex w-full items-center justify-between px-4 py-2.5 text-xs text-foreground/80 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.8.2</span>
+            <span className="shrink-0 text-foreground/50">v1.8.3</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`
