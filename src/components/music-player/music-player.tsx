@@ -452,20 +452,54 @@ export function MusicPlayer() {
       setIsLoading(false)
     }
     const onTimeUpdate = () => setProgress(audio.currentTime)
-    const onPlay = () => setIsPlaying(true)
+    const onPlay = () => {
+      setIsPlaying(true)
+      // v1.8.2: a successful (re)start proves the source works again —
+      // reset the per-track error retry counter.
+      errRetryRef.current.clear()
+    }
     const onPause = () => setIsPlaying(false)
     const onWaiting = () => setIsLoading(true)
     const onCanPlay = () => setIsLoading(false)
+    // v1.8.2: DO NOT jump to the next track on the first load error.
+    // Remote stream URLs (mp3mn CDN) routinely drop mid-play; the old
+    // handler skipped to the next PLAYLIST track and cleared the search
+    // preview after a single hiccup — users saw it as "tracks from search
+    // keep interrupting". Now the same track is silently re-loaded up to
+    // 2 times (the 2nd attempt bypasses a possibly-revoked prefetch blob
+    // by forcing the original URL); only after both retries fail we give
+    // up — skipping forward for playlist tracks, and just stopping for
+    // search previews (jumping from a search preview into the playlist
+    // felt like a random song hijack).
     const onError = () => {
       setIsLoading(false)
       setIsPlaying(false)
-      // Auto-skip to next track if the current one fails to load/play
-      // (e.g. expired URL on MP3mn). This way the user doesn't get stuck
-      // on a dead track.
+      const L = latestRef.current
+      const t = L.currentTrack
+      if (!t?.url) return
+      const tries = (errRetryRef.current.get(t.id) ?? 0) + 1
+      if (tries <= 2) {
+        errRetryRef.current.set(t.id, tries)
+        setTimeout(() => {
+          const a = audioRef.current
+          if (!a) return
+          try {
+            if (tries === 2 && a.src !== t.url) {
+              a.src = t.isStream ? originalStreamUrl(t.url) : t.url
+            }
+            setIsLoading(true)
+            a.load()
+            const p = a.play()
+            if (p) p.then(() => setIsPlaying(true)).catch(() => setIsPlaying(false))
+          } catch { /* element busy — next error/retry path takes over */ }
+        }, tries === 1 ? 800 : 1500)
+        return
+      }
+      errRetryRef.current.delete(t.id)
+      if (L.previewTrack) return // search preview — stop where it died
       setTimeout(() => {
         if (tracks.length > 1) {
           shouldAutoPlayRef.current = true
-          setPreviewTrack(null)
           setCurrentIndex((i) => (i + 1) % tracks.length)
         }
       }, 500)
@@ -646,6 +680,12 @@ export function MusicPlayer() {
   // just completed ahead of time.
   const [audioCache, setAudioCache] = useState<Map<string, string>>(new Map())
   const audioPrefetchInflightRef = useRef<Set<string>>(new Set())
+  // v1.8.2: blobs of PLAYING tracks that the LRU wanted to evict. Revoking
+  // a live blob: src kills playback mid-song, so those are parked here and
+  // dropped only after the track changes.
+  const pendingRevokeRef = useRef<Set<string>>(new Set())
+  // v1.8.2: per-track error retry counters (see the audio onError handler).
+  const errRetryRef = useRef<Map<string, number>>(new Map())
 
   const fetchAudioBytes = useCallback(async (url: string): Promise<Uint8Array | null> => {
     try {
@@ -677,11 +717,19 @@ export function MusicPlayer() {
           setAudioCache((prev) => {
             const m = new Map(prev)
             // LRU: keep at most 3 full tracks (~30 MB), revoke the evicted.
+            // v1.8.2: never revoke the blob of the track playing RIGHT NOW —
+            // that was killing playback mid-song ("tracks from search keep
+            // interrupting"). Park it for a later, safe revoke.
+            const playingId = latestRef.current.currentTrack?.id
             while (m.size >= 3) {
               const oldest = m.keys().next().value as string
               const oldUrl = m.get(oldest)
               if (oldUrl) {
-                try { URL.revokeObjectURL(oldUrl) } catch { /* gone */ }
+                if (oldest === playingId) {
+                  pendingRevokeRef.current.add(oldUrl)
+                } else {
+                  try { URL.revokeObjectURL(oldUrl) } catch { /* gone */ }
+                }
               }
               m.delete(oldest)
             }
@@ -1061,8 +1109,20 @@ export function MusicPlayer() {
 
 
   // ---- Media Session API + Wheel volume ----
-  const latestRef = useRef({ currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef, repeatMode, rtUseEmbed, handleEnded })
-  useEffect(() => { latestRef.current = { currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef, repeatMode, rtUseEmbed, handleEnded } })
+  // v1.8.2: latestRef also carries previewTrack (the audio onError retry
+  // handler reads it to distinguish search previews from playlist tracks).
+  const latestRef = useRef({ currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef, repeatMode, rtUseEmbed, handleEnded, previewTrack })
+  useEffect(() => { latestRef.current = { currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef, repeatMode, rtUseEmbed, handleEnded, previewTrack } })
+  // v1.8.2: on a track change, the parked playing-blob revokes become safe.
+  useEffect(() => {
+    if (pendingRevokeRef.current.size === 0) return
+    const s = pendingRevokeRef.current
+    pendingRevokeRef.current = new Set()
+    const t = window.setTimeout(() => {
+      s.forEach((u) => { try { URL.revokeObjectURL(u) } catch { /* gone */ } })
+    }, 3000)
+    return () => window.clearTimeout(t)
+  }, [currentTrack?.id])
   const getActiveMedia = useCallback(() => { const { currentTrack, audioRef, videoRef } = latestRef.current; if (currentTrack?.isVideo) return videoRef.current; return audioRef.current }, [])
   const updateMediaSession = useCallback(() => { const t = currentTrack; if (!t) { mediaSessionApi.setMetadata({ title: "", artist: "", album: "", artwork: [] }); return } mediaSessionApi.setMetadata({ title: t.title, artist: t.artist, album: t.album || "7-Sonata", artwork: t.coverImage ? [{ src: t.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: t.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }) }, [currentTrack])
   // Register MediaSession action handlers — kept intentionally simple: the
@@ -2551,12 +2611,16 @@ export function MusicPlayer() {
                    : undefined,
                }}
           >
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            {/* v1.8.2: flex-wrap — on narrow screens the sort controls + the
+                track counter pushed the collapse button beyond the panel's
+                overflow-hidden edge, so it VANISHED. Now the row wraps and
+                the toggle always stays reachable. */}
+            <div className="flex flex-wrap items-center justify-between gap-y-1 border-b border-border px-4 py-3">
               <div className="flex items-center gap-2">
                 <ListMusic className="h-4 w-4 text-violet-500 dark:text-emerald-400" />
                 <h3 className="text-sm font-semibold">Плейлист</h3>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 {/* Sort dropdown */}
                 <div className="relative">
                   <select
@@ -2588,7 +2652,7 @@ export function MusicPlayer() {
                   variant="ghost"
                   size="icon"
                   onClick={() => setPlaylistCollapsed(true)}
-                  className="h-7 w-7 text-foreground/80 hover:text-foreground"
+                  className="h-7 w-7 shrink-0 text-foreground/80 hover:text-foreground"
                   aria-label="Скрыть плейлист"
                   title="Скрыть плейлист"
                 >
@@ -2949,7 +3013,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.8.0</span>
+            <span className="shrink-0 text-foreground/50">v1.8.2</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`
