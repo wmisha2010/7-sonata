@@ -26,12 +26,7 @@
       "electron/**/*",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "staged/server",
-        "to": "server"
-      }
-    ],
+    "afterPack": "scripts/afterpack.cjs",
     "win": {
       "target": [
         {

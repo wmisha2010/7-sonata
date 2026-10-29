@@ -20,4 +20,21 @@ console.log(`staging: ${src} -> ${dest}`)
 rmSync(stagedDir, { recursive: true, force: true })
 mkdirSync(dest, { recursive: true })
 cpSync(src, dest, { recursive: true })
+
+// Verify the staged server is complete — electron-builder and NSIS rely on it.
+const required = [
+  "server.js",
+  ["node_modules", "next", "package.json"],
+  [".next", "BUILD_ID"],
+  [".next", "static"],
+]
+for (const rel of required) {
+  const p = path.join(dest, ...[].concat(rel))
+  if (!existsSync(p)) {
+    console.error(`ERROR: в staged/server нет ${path.relative(dest, p)}`)
+    console.error("Standalone-сборка неполная. Удали .next и запусти заново: npm run desktop:win")
+    process.exit(1)
+  }
+}
+console.log("verified: server.js + node_modules/next + BUILD_ID + static")
 console.log("done.")

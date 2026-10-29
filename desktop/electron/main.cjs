@@ -21,6 +21,7 @@ const BASE_PORT = 37654
 let serverProc = null
 let mainWindow = null
 let quitting = false
+let loadFailed = false
 
 // ---- logging (goes to console + userData/sonata-server.log) ----
 function logFilePath() {
@@ -206,9 +207,10 @@ async function createWindow() {
       dialog.showErrorBox(
         "7-Sonata: сервер не отвечает",
         "Встроенный сервер не ответил за 45 секунд.\n\n" +
-          "Чаще всего его блокирует антивирус (Windows Defender, Kaspersky и др.).\n" +
-          "Добавьте 7-Sonata в исключения антивируса и запустите снова.\n\n" +
-          `Лог: ${logFilePath() || "?"}`,
+          "Точная причина — в логе, строки с пометкой [server:err]:\n" +
+          `${logFilePath() || "(лог недоступен)"}\n\n` +
+          "Частые причины: антивирус заблокировал запуск вложенного процесса\n" +
+          "(добавьте 7-Sonata в исключения) либо сборка оказалась неполной.",
       )
     }
     url = `http://127.0.0.1:${port}/`
@@ -240,6 +242,7 @@ async function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => log("page did-finish-load"))
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, u, isMain) => {
     if (!isMain) return
+    loadFailed = true
     log(`did-fail-load: code=${code} desc=${desc} url=${u}`)
     dialog.showErrorBox(
       "7-Sonata: не удалось загрузить интерфейс",
@@ -274,7 +277,7 @@ async function createWindow() {
   if (!DEV_SERVER_URL && !gpuDisabled) {
     setTimeout(async () => {
       try {
-        if (!mainWindow || mainWindow.isDestroyed()) return
+        if (!mainWindow || mainWindow.isDestroyed() || loadFailed) return
         const image = await mainWindow.webContents.capturePage()
         if (isMostlyBlack(image)) relaunchWithoutGpu("screen stayed black after load")
         else log("black-screen check passed: content rendered")
