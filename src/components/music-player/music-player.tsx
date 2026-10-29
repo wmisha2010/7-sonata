@@ -29,11 +29,6 @@ import {
   X,
   PanelLeft,
   PanelLeftOpen,
-  Download,
-  Smartphone,
-  Monitor,
-  FileArchive,
-  FolderArchive,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { APP_VERSION } from "@/lib/version"
@@ -161,12 +156,6 @@ export function MusicPlayer() {
   // Collapse the playlist panel (especially useful on mobile / narrow screens
   // so the player gets the full width).
   const [playlistCollapsed, setPlaylistCollapsed] = useState(false)
-  // Download menu — offered only in a regular browser (not inside the
-  // Capacitor app / Electron build, where downloading the app makes no sense).
-  const [canDownload, setCanDownload] = useState(false)
-  // Electron IPC bridge for the footer "Скачать" menu (saves artifacts to ~/Downloads)
-  const [desktopSave, setDesktopSave] = useState<((kind: string) => Promise<{ ok: boolean; path?: string; error?: string }>) | null>(null)
-  const [downloadNote, setDownloadNote] = useState<string | null>(null)
   // Playlist sort mode — user can sort by title, artist, duration, date added.
   const [sortMode, setSortMode] = useState<"default" | "title" | "artist" | "duration" | "date">("default")
   const [sortAsc, setSortAsc] = useState(true)
@@ -371,38 +360,6 @@ export function MusicPlayer() {
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === "dark" ? "light" : "dark"))
   }, [])
-
-  // ---- Platform detection for the download menu ----
-  // - Capacitor (Android): the app IS the APK — the menu stays hidden.
-  // - Electron desktop: the menu saves artifacts to the system Downloads
-  //   folder via the window.sonata IPC bridge.
-  // - Regular browser: direct links to /api/download on the web server.
-  useEffect(() => {
-    try {
-      const w = window as any
-      const isNative = !!w.Capacitor
-      setCanDownload(!isNative)
-      const canSave = !isNative && !!w.sonata?.isDesktop && typeof w.sonata?.saveArtifact === "function"
-      setDesktopSave(canSave ? (kind: string) => w.sonata.saveArtifact(kind) : null)
-    } catch {
-      setCanDownload(false)
-      setDesktopSave(null)
-    }
-  }, [])
-
-  const handleSaveArtifact = useCallback(async (kind: string) => {
-    if (!desktopSave) return
-    setDownloadNote("Сохранение…")
-    try {
-      const res = await desktopSave(kind)
-      if (res?.ok && res.path) setDownloadNote(`Сохранено в «Загрузки»: ${res.path}`)
-      else setDownloadNote(res?.error ? `Не удалось сохранить: ${res.error}` : "Не удалось сохранить файл")
-    } catch (e) {
-      setDownloadNote(`Не удалось сохранить: ${String(e)}`)
-    } finally {
-      window.setTimeout(() => setDownloadNote(null), 7000)
-    }
-  }, [desktopSave])
 
   // ---- Restore the user's saved library on mount ----
   useEffect(() => {
@@ -3067,13 +3024,6 @@ export function MusicPlayer() {
         </div>
       </div>
 
-      {/* Download status toast (desktop "Скачать" menu) */}
-      {downloadNote && (
-        <div role="status" className="fixed bottom-14 right-4 z-[60] max-w-[320px] rounded-xl border border-border/60 bg-background/95 px-3.5 py-2.5 text-xs leading-snug text-foreground shadow-2xl backdrop-blur-md">
-          {downloadNote}
-        </div>
-      )}
-
       {/* Footer — app name, version, current track, and "show playlist" button */}
       <footer className="relative z-10 mt-auto border-t border-border/60 backdrop-blur-xl" style={{ backgroundColor: currentTrack ? (theme === "dark" ? `${currentTrack.cover.to}66` : `${currentTrack.cover.to}55`) : undefined }}>
         <div className="relative z-10 flex w-full items-center justify-between px-4 py-2.5 text-xs text-foreground/80 sm:px-6 lg:px-8">
@@ -3092,58 +3042,6 @@ export function MusicPlayer() {
               Перемешивание {shuffle ? "вкл" : "выкл"} ·{" "}
               {repeatLabel.toLowerCase()}
             </span>
-            {canDownload && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 gap-1.5 px-2 text-[11px] text-foreground/80 hover:text-foreground"
-                    aria-label="Скачать приложение"
-                    title="Скачать приложение"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span className="hidden sm:inline">Скачать</span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-60">
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    Скачать 7-Sonata
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {([
-                    { kind: "apk", file: "sonata-mobile.apk", title: "Android — APK", Icon: Smartphone },
-                    { kind: "appimage", file: "sonata-desktop.AppImage", title: "Linux — AppImage", Icon: Monitor },
-                    { kind: "zip", file: "sonata-desktop.zip", title: "Исходники десктопа — ZIP", Icon: FileArchive },
-                    { kind: "source", file: "sonata-source.zip", title: "Полный исходный код — ZIP", Icon: FolderArchive },
-                  ] as const).map(({ kind, file, title, Icon }) => (
-                    <DropdownMenuItem
-                      key={kind}
-                      onSelect={desktopSave ? () => void handleSaveArtifact(kind) : undefined}
-                      asChild={!desktopSave}
-                    >
-                      {desktopSave ? (
-                        <span className="flex w-full cursor-pointer items-center gap-2">
-                          <Icon className="h-4 w-4 text-violet-500 dark:text-emerald-500" />
-                          <span className="flex flex-col">
-                            <span className="text-sm font-medium">{title}</span>
-                            <span className="text-[11px] text-muted-foreground">{file}</span>
-                          </span>
-                        </span>
-                      ) : (
-                        <a href={`/api/download?file=${file}`} download={file} className="flex cursor-pointer items-center gap-2">
-                          <Icon className="h-4 w-4 text-violet-500 dark:text-emerald-500" />
-                          <span className="flex flex-col">
-                            <span className="text-sm font-medium">{title}</span>
-                            <span className="text-[11px] text-muted-foreground">{file}</span>
-                          </span>
-                        </a>
-                      )}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
             <Button
               variant="ghost"
               size="icon"
