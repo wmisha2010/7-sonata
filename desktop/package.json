@@ -1,6 +1,6 @@
 {
   "name": "sonata-desktop",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "7-Sonata — десктопный музыкальный плеер",
   "main": "electron/main.cjs",
   "scripts": {

@@ -1,4 +1,5 @@
 export interface CoverColors { from: string; to: string }
+import { httpBlobAsDataUrl } from "./http"
 const DEFAULT_COLORS: CoverColors = { from: "#10b981", to: "#0ea5e9" }
 function rgbToHex(r: number, g: number, b: number): string { return "#" + [r, g, b].map((x) => Math.round(x).toString(16).padStart(2, "0")).join("") }
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
@@ -29,22 +30,14 @@ function boostColor(r: number, g: number, b: number, ts = 0.7, tl = 0.6): [numbe
 // Fetch image bytes and convert to a data URL. Loading a data URL into
 // <img> bypasses CORS/canvas-tainting entirely, so getImageData() always
 // works afterwards:
-//  - Capacitor (mobile): GET fetches are transparently proxied through the
-//    native layer (window.fetch → /_capacitor_http_interceptor_), so ANY
-//    remote URL is fetchable even if the server sends no CORS headers
-//    (e.g. mp3mn.net covers).
+//  - Capacitor (mobile): goes through lib/http.ts → CapacitorHttp native
+//    stack — ANY remote URL is fetchable even if the server sends no CORS
+//    headers (e.g. mp3mn.net covers). The WebView itself does NOT proxy
+//    fetches unless the global CapacitorHttp interceptor is enabled, so
+//    plain fetch would fail for most covers.
 //  - Electron (desktop): webSecurity:false disables CORS checks for fetch.
 async function fetchAsDataUrl(url: string): Promise<string> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error("HTTP " + res.status)
-  const blob = await res.blob()
-  if (!blob.size) throw new Error("empty body")
-  return await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader()
-    fr.onload = () => resolve(fr.result as string)
-    fr.onerror = () => reject(new Error("fileReader fail"))
-    fr.readAsDataURL(blob)
-  })
+  return await httpBlobAsDataUrl(url)
 }
 
 export async function extractCoverColors(imageUrl: string, fallback: CoverColors = DEFAULT_COLORS): Promise<CoverColors> {

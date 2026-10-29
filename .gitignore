@@ -79,3 +79,6 @@ next-env.d.ts
 /mobile/android/app/build/
 /mobile/android/build/
 /mobile/android/capacitor-cordova-android-plugins/build/
+android-sdk/
+android-sdk/
+tool-results/

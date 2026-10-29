@@ -1,0 +1,42 @@
+// Redirect all Maven repositories to mirror mirrors to bypass Maven Central rate limits.
+// Applied via: gradle --init-script init.mirrors.gradle
+allprojects {
+    buildscript {
+        repositories {
+            maven { url 'https://maven.aliyun.com/repository/public' }
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/central' }
+            maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+            maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
+    }
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+settingsEvaluated { settings ->
+    settings.pluginManagement {
+        repositories {
+            maven { url 'https://maven.aliyun.com/repository/public' }
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/central' }
+            maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+            gradlePluginPortal()
+            google()
+            mavenCentral()
+        }
+    }
+}

@@ -1,13 +1,15 @@
 // MP3mn.net music search — full-length tracks, no API key needed.
-// Desktop (Electron) / Mobile (Capacitor) build: the fetch runs directly
-// from the renderer — cross-origin restrictions are lifted on those
-// platforms (Electron webSecurity:false, Capacitor native HTTP interceptor).
+// Desktop (Electron): fetch runs directly (webSecurity:false).
+// Mobile (Capacitor): requests go through lib/http.ts → CapacitorHttp
+// native stack (the WebView itself enforces CORS and mp3mn.net sends no
+// ACAO headers, so plain fetch fails with a TypeError).
 // The aggregation logic mirrors the web app's /api/mp3mn-search route:
 // mp3mn caps ONE query at ~20-23 tracks and has no pagination, so we fire
 // the full query AND one search per significant word, in parallel, then
 // merge + dedupe (up to 200 results).
 
 import type { Track } from "./tracks"
+import { httpJson } from "./http"
 
 export interface Mp3mnTrack {
   id: string
@@ -55,14 +57,10 @@ function parseHtml(html: string, coverUrl: string | undefined, tag: number): Mp3
 // One search round-trip: mp3mn /api/search → track page → parse.
 async function searchOnce(q: string, tag: number): Promise<Mp3mnTrack[]> {
   const headers = { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" }
-  const aR = await fetch(`https://mp3mn.net/api/search?query=${encodeURIComponent(q)}`, { headers })
-  if (!aR.ok) return []
-  const aJ = await aR.json()
+  const aJ = await httpJson(`https://mp3mn.net/api/search?query=${encodeURIComponent(q)}`, headers)
   const rp = aJ.url
   if (!rp) return []
-  const pR = await fetch(`https://mp3mn.net${rp}`, { headers })
-  if (!pR.ok) return []
-  const pJ = await pR.json()
+  const pJ = await httpJson(`https://mp3mn.net${rp}`, headers)
   const html = pJ.xx1_content || pJ.xx2_content || ""
   const cm = html.match(/src="(\/public\/album\/[^"]+)"/)
   const cu = cm ? `https://mp3mn.net${cm[1]}` : undefined

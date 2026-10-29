@@ -1,11 +1,22 @@
 // Rutube video search + HLS source resolution for the desktop (Electron)
 // and mobile (Capacitor) builds. The web build routes everything through
 // its /api/video-search and /api/video-stream server routes; here there is
-// no local server, so the renderer talks to Rutube's public REST API
-// directly (allowed: Electron webSecurity:false / Capacitor native HTTP
-// interceptor).
+// no local server, so the renderer talks to Rutube's public REST API via
+// lib/http.ts:
+//   • Electron — plain fetch (webSecurity:false, no CORS).
+//   • Capacitor — CapacitorHttp native stack (the WebView enforces CORS and
+//     rutube.ru WAF answers 403 to the https://localhost Origin; native
+//     requests carry no Origin header and succeed).
+//
+// Master manifest note: bl.rutube.ru (the video_balancer.m3u8 host) does
+// NOT send Access-Control-Allow-Origin, so hls.js in the WebView cannot
+// load it. The per-variant playlists on river-*.rtbcdn.ru / river-*.rutube.ru
+// DO echo any Origin. Therefore on native we fetch the master manifest
+// ourselves (httpText) and return the BEST variant playlist URL (max
+// height ≤ 720p) directly — hls.js then loads only CORS-friendly hosts.
 
 import type { Track } from "./tracks"
+import { httpJson, httpText, isNativePlatform } from "./http"
 
 export interface RutubeVideo {
   id: string
@@ -30,15 +41,18 @@ interface RawRutubeResult {
   author?: { name?: string }
 }
 
+// Same UA the web build's /api/video-search route uses.
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+const BASE_HEADERS = { Accept: "application/json", "User-Agent": UA, Referer: "https://rutube.ru/" }
+
 export async function searchRutube(query: string): Promise<RutubeVideo[]> {
   if (!query.trim()) return []
   try {
-    const r = await fetch(
+    const j = await httpJson(
       `https://rutube.ru/api/search/video/?query=${encodeURIComponent(query)}`,
-      { headers: { Accept: "application/json" } }
+      BASE_HEADERS
     )
-    if (!r.ok) return []
-    const j = await r.json()
     // Non-video entries (audio-only, livestreams, deleted/hidden/locked/paid)
     // are filtered out so every result is actually playable.
     const videos = (j.results ?? [])
@@ -79,22 +93,74 @@ export function rutubeId(url: string): string {
   return url.slice("rutube:".length)
 }
 
-// Resolve the signed master HLS manifest for a video id. The URL comes from
+// Pick the best variant from a master m3u8 playlist for phones: highest
+// resolution with height ≤ 720 (falls back to the smallest available).
+// Returns the absolute variant playlist URL, or null if nothing parsed.
+function pickVariant(masterText: string): string | null {
+  const lines = masterText.split("\n")
+  type Variant = { url: string; height: number; bandwidth: number }
+  const variants: Variant[] = []
+  for (let i = 0; i < lines.length - 1; i++) {
+    const m = lines[i].match(/^#EXT-X-STREAM-INF:(.*)$/)
+    if (!m) continue
+    const attrs = m[1]
+    const res = attrs.match(/RESOLUTION=(\d+)x(\d+)/)
+    const bw = attrs.match(/BANDWIDTH=(\d+)/)
+    let url = ""
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j].trim()
+      if (line && !line.startsWith("#")) {
+        url = line
+        break
+      }
+    }
+    if (!url) continue
+    variants.push({
+      url,
+      height: res ? parseInt(res[2]) : 0,
+      bandwidth: bw ? parseInt(bw[1]) : 0,
+    })
+  }
+  if (!variants.length) return null
+  const capped = variants.filter((v) => v.height > 0 && v.height <= 720)
+  const best =
+    capped.length > 0
+      ? capped.reduce((a, b) => (b.height > a.height || (b.height === a.height && b.bandwidth > a.bandwidth) ? b : a))
+      : variants.reduce((a, b) => (b.height > 0 && (a.height === 0 || b.height < a.height) ? b : a))
+  try {
+    return new URL(best.url).toString()
+  } catch {
+    return best.url
+  }
+}
+
+// Resolve a CORS-safe HLS URL for a video id. The URL comes from
 // rutube.ru/api/play/options (video_balancer.m3u8) — it is pre-signed
-// (sign+expire) and works without extra referer/cookies. hls.js loads it
-// cross-origin; all nested manifests/segments are absolute URLs on the same
-// CDN hosts, so no rewriting is needed outside the web build.
+// (sign+expire) and works without extra referer/cookies.
+//  • Web/desktop: return the master manifest as-is (hls.js handles it —
+//    Electron has no CORS).
+//  • Native/mobile: fetch the master via the native stack and return a
+//    single variant playlist (rtbcdn echoes any Origin → hls.js works,
+//    Web Audio stays tap-able → visualizer gets real samples).
 export async function resolveRutubeMasterUrl(videoId: string): Promise<string | null> {
   if (!/^[0-9a-f]{32}$/i.test(videoId)) return null
   try {
-    const r = await fetch(`https://rutube.ru/api/play/options/${videoId}/?i=1`, {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    })
-    if (!r.ok) return null
-    const j = (await r.json()) as { video_balancer?: { m3u8?: string } | null }
+    const j = (await httpJson(`https://rutube.ru/api/play/options/${videoId}/?i=1`, {
+      ...BASE_HEADERS,
+      "X-Requested-With": "XMLHttpRequest",
+    })) as { video_balancer?: { m3u8?: string } | null }
     const master = j?.video_balancer?.m3u8
-    return typeof master === "string" && master ? master : null
+    if (typeof master !== "string" || !master) return null
+    if (!isNativePlatform()) return master
+    try {
+      const masterText = await httpText(master, { "User-Agent": UA })
+      const variant = pickVariant(masterText)
+      if (variant) return variant
+    } catch {
+      // Fall through to the master URL — the player will try and, if CORS
+      // blocks it, switch to the iframe embed.
+    }
+    return master
   } catch {
     return null
   }
