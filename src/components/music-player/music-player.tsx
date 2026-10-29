@@ -62,6 +62,26 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+
+// ---- hls.js tuning for Rutube VOD (v1.7.5 anti-stall) ----
+// The old config kept only 30 s of forward buffer and let ABR up-switch
+// aggressively, so any CDN hiccup stalled playback ("stops, buffers, plays
+// again"). Now: a large forward buffer rides out network dips, conservative
+// up-switching avoids bitrate overshoot, backBufferLength keeps memory in
+// check on long videos, and nudgeMaxRetry rides out short decoder stalls.
+const RT_HLS_CONF = {
+  enableWorker: true,
+  maxBufferLength: 90,
+  maxMaxBufferLength: 300,
+  maxBufferSize: 120 * 1000 * 1000,
+  backBufferLength: 60,
+  abrEwmaDefaultEstimate: 1_000_000,
+  abrBandWidthFactor: 0.95,
+  abrBandWidthUpFactor: 0.8,
+  startLevel: -1,
+  nudgeMaxRetry: 10,
+}
+
 // Media Session API wrapper
 interface MediaSessionPluginShape {
   setMetadata(opts: { title: string; artist: string; album: string; artwork: any[] }): Promise<void>
@@ -623,7 +643,7 @@ export function MusicPlayer() {
     }
 
     if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, maxBufferLength: 30 })
+      const hls = new Hls(RT_HLS_CONF)
       hlsRef.current = hls
       hls.loadSource(src)
       hls.attachMedia(video)
@@ -1097,7 +1117,7 @@ export function MusicPlayer() {
       const master = rtMasterUrlRef.current
       if (!master) { stopBgAudio(); return }
       if (Hls.isSupported()) {
-        const h = new Hls({ enableWorker: true, maxBufferLength: 30 })
+        const h = new Hls(RT_HLS_CONF)
         bgHlsRef.current = h
         h.loadSource(master)
         h.attachMedia(el)
@@ -2799,7 +2819,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.7.4</span>
+            <span className="shrink-0 text-foreground/50">v1.7.5</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`
