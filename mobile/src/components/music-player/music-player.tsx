@@ -62,24 +62,71 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-// Media Session API wrapper
+// Media Session API wrapper — MOBILE BUILD.
+// v1.7.2: STATIC import of @jofr/capacitor-media-session. The previous
+// dynamic import() lived in a separate Vite chunk; if that chunk failed on
+// a device, the error was swallowed by catch(() => {}) and the player
+// silently fell back to navigator.mediaSession — the WebView's own media
+// card has NO buttons, which looked like "the shade is broken". A static
+// import puts the plugin proxy into the main chunk so it is ALWAYS there.
+// Every native failure is now RECORDED and surfaced in the footer as a
+// MS:ERR marker, so one screenshot pinpoints the failing layer.
 interface MediaSessionPluginShape {
   setMetadata(opts: { title: string; artist: string; album: string; artwork: any[] }): Promise<void>
   setPlaybackState(opts: { playbackState: string }): Promise<void>
   setActionHandler(opts: { action: string }, handler: ((d: any) => void) | null): Promise<void>
   setPositionState(opts: { duration: number; position: number; playbackRate: number }): Promise<void>
 }
-let _nms: MediaSessionPluginShape | null | undefined
-async function getNativeMediaSession(): Promise<MediaSessionPluginShape | null> {
-  if (_nms !== undefined) return _nms; _nms = null
-  try { const w = typeof window !== "undefined" ? (window as any) : undefined; if (!w?.Capacitor?.isNativePlatform?.()) return null; const m = await import("@jofr/capacitor-media-session"); _nms = (m?.MediaSession as MediaSessionPluginShape) ?? null } catch { _nms = null }
-  return _nms
+import { MediaSession as NativeMediaSessionPlugin } from "@jofr/capacitor-media-session"
+
+export type MediaSessionMode = "native" | "web" | "err"
+let msMode: MediaSessionMode = "web"
+let msErr = ""
+let msStatusListener: ((mode: MediaSessionMode, err: string) => void) | null = null
+export function onMediaSessionStatus(cb: (mode: MediaSessionMode, err: string) => void) { msStatusListener = cb; cb(msMode, msErr) }
+function reportMsStatus() { try { msStatusListener?.(msMode, msErr) } catch {} }
+function markMs(mode: MediaSessionMode, err = "") { if (msMode === mode && msErr === err) return; msMode = mode; msErr = err; reportMsStatus() }
+function msErrMsg(e: any): string { try { if (typeof e === "string") return e.slice(0, 48); const m = e?.message || (e ? String(e) : "unknown"); return String(m).slice(0, 48) } catch { return "unknown" } }
+const msIsNative = () => typeof window !== "undefined" && !!(window as any)?.Capacitor?.isNativePlatform?.()
+function nativeMs(): MediaSessionPluginShape | null {
+  if (!msIsNative()) return null
+  return NativeMediaSessionPlugin as unknown as MediaSessionPluginShape
+}
+// WebView fallback (also used when a native call rejects, so at least the
+// in-app controls keep receiving system events).
+const msFallback = {
+  metadata(o: { title: string; artist: string; album: string; artwork: any[] }) { if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return; try { navigator.mediaSession.metadata = new MediaMetadata({ title: o.title, artist: o.artist, album: o.album, artwork: o.artwork as any }) } catch {} },
+  playbackState(s: "playing" | "paused" | "none") { if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return; try { navigator.mediaSession.playbackState = s as MediaSessionPlaybackState } catch {} },
+  actionHandler(a: string, h: ((d: any) => void) | null) { if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return; try { navigator.mediaSession.setActionHandler(a as MediaSessionAction, h as MediaSessionActionHandler | null) } catch {} },
+  positionState(o: { duration: number; position: number; playbackRate: number }) { if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return; try { navigator.mediaSession.setPositionState(o as any) } catch {} },
 }
 const mediaSessionApi = {
-  setMetadata(o: { title: string; artist: string; album: string; artwork: any[] }) { void getNativeMediaSession().then((n) => { if (n) { void n.setMetadata(o).catch(() => {}); return } if (typeof navigator !== "undefined" && "mediaSession" in navigator) { try { navigator.mediaSession.metadata = new MediaMetadata({ title: o.title, artist: o.artist, album: o.album, artwork: o.artwork as any }) } catch {} } }) },
-  setPlaybackState(s: "playing" | "paused" | "none") { void getNativeMediaSession().then((n) => { if (n) { void n.setPlaybackState({ playbackState: s }).catch(() => {}); return } if (typeof navigator !== "undefined" && "mediaSession" in navigator) navigator.mediaSession.playbackState = s as MediaSessionPlaybackState }) },
-  setActionHandler(a: string, h: ((d: any) => void) | null) { void getNativeMediaSession().then((n) => { if (n) { void n.setActionHandler({ action: a }, h).catch(() => {}); return } if (typeof navigator !== "undefined" && "mediaSession" in navigator) { try { navigator.mediaSession.setActionHandler(a as MediaSessionAction, h as MediaSessionActionHandler | null) } catch {} } }) },
-  setPositionState(o: { duration: number; position: number; playbackRate: number }) { void getNativeMediaSession().then((n) => { if (n) { void n.setPositionState(o).catch(() => {}); return } if (typeof navigator !== "undefined" && "mediaSession" in navigator) { try { navigator.mediaSession.setPositionState(o as any) } catch {} } }) },
+  setMetadata(o: { title: string; artist: string; album: string; artwork: any[] }) {
+    const n = nativeMs()
+    if (!n) { markMs("web"); msFallback.metadata(o); return }
+    // The plugin decodes artwork with HttpURLConnection on the ANDROID MAIN
+    // thread — remote http(s) covers would throw NetworkOnMainThreadException
+    // and REJECT the whole call (title/artist never reach the session card).
+    // Strip remote URLs for the native call; local blob:/data: artwork still
+    // passes through.
+    const safeArt = (o.artwork || []).filter((a: any) => a && typeof a.src === "string" && !a.src.startsWith("http"))
+    n.setMetadata({ ...o, artwork: safeArt }).then(() => markMs("native")).catch((e) => { markMs("err", msErrMsg(e)); msFallback.metadata(o) })
+  },
+  setPlaybackState(s: "playing" | "paused" | "none") {
+    const n = nativeMs()
+    if (!n) { markMs("web"); msFallback.playbackState(s); return }
+    n.setPlaybackState({ playbackState: s }).then(() => markMs("native")).catch((e) => { markMs("err", msErrMsg(e)); msFallback.playbackState(s) })
+  },
+  setActionHandler(a: string, h: ((d: any) => void) | null) {
+    const n = nativeMs()
+    if (!n) { markMs("web"); msFallback.actionHandler(a, h); return }
+    n.setActionHandler({ action: a }, h).then(() => markMs("native")).catch((e) => { markMs("err", msErrMsg(e)); msFallback.actionHandler(a, h) })
+  },
+  setPositionState(o: { duration: number; position: number; playbackRate: number }) {
+    const n = nativeMs()
+    if (!n) { markMs("web"); msFallback.positionState(o); return }
+    n.setPositionState(o).then(() => markMs("native")).catch((e) => { markMs("err", msErrMsg(e)); msFallback.positionState(o) })
+  },
 }
 
 
@@ -415,6 +462,7 @@ export function MusicPlayer() {
       setTimeout(() => {
         if (tracks.length > 1) {
           shouldAutoPlayRef.current = true
+          setPreviewTrack(null)
           setCurrentIndex((i) => (i + 1) % tracks.length)
         }
       }, 500)
@@ -698,6 +746,10 @@ export function MusicPlayer() {
 
   const playNext = useCallback(() => {
     if (tracks.length === 0) return
+    // A stuck search-preview track overrides currentTrack (see its useMemo),
+    // so switching the index underneath would change nothing — clear it on
+    // ANY explicit next/prev request (same as playIndex does).
+    setPreviewTrack(null)
     if (shuffle) {
       if (tracks.length === 1) {
         selectTrack(0)
@@ -728,6 +780,8 @@ export function MusicPlayer() {
 
   const playPrev = useCallback(() => {
     if (tracks.length === 0) return
+    // Same previewTrack reasoning as playNext above.
+    setPreviewTrack(null)
     if (shuffle && shuffleHistory.current.length > 0) {
       const prev = shuffleHistory.current.pop()!
       shouldAutoPlayRef.current = true
@@ -974,6 +1028,11 @@ export function MusicPlayer() {
     for (const a of actions) mediaSessionApi.setActionHandler(a, h[a])
   }, [getActiveMedia, rtUseEmbed])
   useEffect(() => { updateMediaSession() }, [updateMediaSession])
+  // Footer diagnostic for the native MediaSession bridge: if the shade card
+  // has no buttons, the marker next to the version tells us which layer
+  // failed (native plugin rejected a call → MS:ERR:<msg>).
+  const [msDiag, setMsDiag] = useState<{ mode: MediaSessionMode; err: string }>({ mode: "web", err: "" })
+  useEffect(() => { onMediaSessionStatus((mode, err) => setMsDiag({ mode, err })) }, [])
   useEffect(() => { mediaSessionApi.setPlaybackState(isPlaying ? "playing" : "paused") }, [isPlaying, currentTrack?.url])
   useEffect(() => { if (!currentTrack?.url) return; mediaSessionApi.setMetadata({ title: currentTrack.title, artist: currentTrack.artist, album: currentTrack.album || "7-Sonata", artwork: currentTrack.coverImage ? [{ src: currentTrack.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: currentTrack.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }); if (isPlaying) mediaSessionApi.setPlaybackState("playing") }, [currentTrack?.url])
   useEffect(() => { const m = currentTrack?.isVideo ? videoRef.current : audioRef.current; if (!m || !Number.isFinite(m.duration)) return; try { mediaSessionApi.setPositionState({ duration: m.duration, position: m.currentTime, playbackRate: 1 }) } catch {} }, [progress, currentTrack?.isVideo])
@@ -2610,7 +2669,12 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.7.1</span>
+            <span className="shrink-0 text-foreground/50">v1.7.2</span>
+            {msDiag.mode === "err" && (
+              <span className="shrink-0 text-amber-500 dark:text-amber-400" title={`MediaSession: ${msDiag.err}`}>
+                MS:ERR ({msDiag.err})
+              </span>
+            )}
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`

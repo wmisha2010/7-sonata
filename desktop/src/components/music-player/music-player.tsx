@@ -415,6 +415,7 @@ export function MusicPlayer() {
       setTimeout(() => {
         if (tracks.length > 1) {
           shouldAutoPlayRef.current = true
+          setPreviewTrack(null)
           setCurrentIndex((i) => (i + 1) % tracks.length)
         }
       }, 500)
@@ -698,6 +699,10 @@ export function MusicPlayer() {
 
   const playNext = useCallback(() => {
     if (tracks.length === 0) return
+    // A stuck search-preview track overrides currentTrack (see its useMemo),
+    // so switching the index underneath would change nothing — clear it on
+    // ANY explicit next/prev request (same as playIndex does).
+    setPreviewTrack(null)
     if (shuffle) {
       if (tracks.length === 1) {
         selectTrack(0)
@@ -728,6 +733,8 @@ export function MusicPlayer() {
 
   const playPrev = useCallback(() => {
     if (tracks.length === 0) return
+    // Same previewTrack reasoning as playNext above.
+    setPreviewTrack(null)
     if (shuffle && shuffleHistory.current.length > 0) {
       const prev = shuffleHistory.current.pop()!
       shouldAutoPlayRef.current = true
@@ -2610,7 +2617,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.7.1</span>
+            <span className="shrink-0 text-foreground/50">v1.7.2</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`
