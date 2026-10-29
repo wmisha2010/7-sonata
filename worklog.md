@@ -193,3 +193,20 @@ Stage Summary:
 - KEY LESSON: when a known-good APK exists, patch its assets instead of rebuilding — eliminates ALL native-side variables (gradle, manifest merger, config, Capacitor version drift)
 - Signed with same debug keystore → installs as update over user's rolled-back 1.6.0 (no uninstall needed); if signature mismatch ever occurs, uninstall first
 - Git commit be1bedd; working tree clean
+
+---
+Task ID: 12
+Agent: Z.ai Code (main)
+Task: v1.7.2 — user screenshot showed shade media card WITHOUT buttons (app name "7-Sonata", no controls, no track title).
+
+Work Log:
+- Static analysis of full chain: plugin manifest (service+MediaButtonReceiver via AAR merger OK), capacitor.plugins.json (MediaSession registered OK), capacitor.config.json (foregroundService=always OK), MainActivity (POST_NOTIFICATIONS + media keys OK), built chunk index-C48XaDjx.js (registerPlugin present OK) — everything correct on paper
+- Key difference vs known-good 1.6.0: 1.6.0 passed LOCAL blob: artwork; 1.7.x passes REMOTE http covers → plugin urlToBitmap runs HttpURLConnection on the main thread → NetworkOnMainThreadException → setMetadata rejects silently (swallowed by catch(()=>{})), title never reached the card
+- v1.7.2 fixes: (1) static import of @jofr/capacitor-media-session — proxy now inside main chunk, dynamic chunk-load failure class eliminated; (2) remote http artwork stripped for native setMetadata (blob:/data: still pass); (3) MS:ERR footer diagnostic — any native rejection now visible next to version; (4) next/prev buttons did nothing while a search preview was stuck (previewTrack overrides currentTrack) — cleared in playNext/playPrev + audio onError auto-skip, all 3 copies (web/desktop/mobile); (5) desktop package.json + APK versionName/versionCode bumped (1.7.2/11)
+- Rebuilt: APK (7.97MB, verified badging + manifest merger + footer/MS:ERR markers in assets), Windows portable zip, AppImage, 2 src zips
+- Release REL_ID=427333808 updated: all 5 assets replaced with 1.7.2, body rewritten (scripts/release-172.sh)
+- Git commit 740c490 pushed
+
+Stage Summary:
+- If the shade STILL shows no buttons with v1.7.2 footer and NO MS:ERR marker → the failure is inside the native plugin callback layer (hasActionHandler/dangling) → next step: patch plugin Java directly
+- If footer shows MS:ERR (msg) → the message names the rejecting layer exactly
