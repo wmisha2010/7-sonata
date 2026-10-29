@@ -858,6 +858,30 @@ export function MusicPlayer() {
   )
 
   const playNext = useCallback(() => {
+    // Search-result preview is active → iterate through searchResults,
+    // NOT through the playlist. Otherwise the user clicks a search result
+    // and the Next button jumps to a totally unrelated playlist track.
+    if (previewTrack) {
+      if (searchResults.length === 0) return
+      if (shuffle && searchResults.length > 1) {
+        let next = 0
+        do { next = Math.floor(Math.random() * searchResults.length) }
+        while (searchResults[next].url === previewTrack.url)
+        setPreviewTrack(searchResults[next])
+        shouldAutoPlayRef.current = true
+        return
+      }
+      const pos = searchResults.findIndex((t) => t.url === previewTrack.url)
+      // Wrap-around when reaching the last search result: if repeat is off,
+      // stop at the end. Otherwise (repeat-all/one) keep going.
+      if (pos !== -1 && pos === searchResults.length - 1 && repeatMode === "off") {
+        return
+      }
+      const nextPos = (pos === -1 ? 0 : pos + 1) % searchResults.length
+      setPreviewTrack(searchResults[nextPos])
+      shouldAutoPlayRef.current = true
+      return
+    }
     if (tracks.length === 0) return
     // A stuck search-preview track overrides currentTrack (see its useMemo),
     // so switching the index underneath would change nothing — clear it on
@@ -889,9 +913,18 @@ export function MusicPlayer() {
     if (realIdx === -1) return
     shouldAutoPlayRef.current = true
     selectTrack(realIdx)
-  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack, previewTrack, searchResults, repeatMode])
 
   const playPrev = useCallback(() => {
+    // Search-result preview is active → iterate through searchResults.
+    if (previewTrack) {
+      if (searchResults.length === 0) return
+      const pos = searchResults.findIndex((t) => t.url === previewTrack.url)
+      const prevPos = (pos === -1 ? 0 : pos - 1 + searchResults.length) % searchResults.length
+      setPreviewTrack(searchResults[prevPos])
+      shouldAutoPlayRef.current = true
+      return
+    }
     if (tracks.length === 0) return
     // Same previewTrack reasoning as playNext above.
     setPreviewTrack(null)
@@ -911,7 +944,7 @@ export function MusicPlayer() {
     if (realIdx === -1) return
     shouldAutoPlayRef.current = true
     selectTrack(realIdx)
-  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack])
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack, previewTrack, searchResults])
 
   const togglePlay = useCallback(() => {
     // Rutube embeds are controlled via postMessage commands; native HLS
@@ -973,6 +1006,19 @@ export function MusicPlayer() {
     }
     // Stop only when the current track is the LAST one in the DISPLAYED
     // (sorted/filtered) order — not in storage order.
+    if (previewTrack) {
+      // Search-result preview: stop at the last result (or wrap if repeat-all).
+      const pos = searchResults.findIndex((t) => t.url === previewTrack.url)
+      const isLastSearch = searchResults.length === 0 || pos === searchResults.length - 1
+      if (!shuffle && repeatMode === "off" && isLastSearch) {
+        setIsPlaying(false)
+        const audio = audioRef.current
+        if (audio) { audio.pause(); audio.currentTime = 0 }
+        return
+      }
+      playNext()
+      return
+    }
     const order = sortedTracks
     const curId = currentTrack?.id
     const isLastInView =
@@ -996,7 +1042,7 @@ export function MusicPlayer() {
       return
     }
     playNext()
-  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo, isRtEmbed, rtCommand])
+  }, [repeatMode, shuffle, currentIndex, tracks, sortedTracks, playNext, currentTrack?.id, currentTrack?.isVideo, isRtEmbed, rtCommand, previewTrack, searchResults])
 
   // Rutube iframe events: the embed posts JSON STRINGS {type,data} with
   // origin https://rutube.ru (verified against the live player). The source
