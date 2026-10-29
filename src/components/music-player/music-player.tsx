@@ -180,6 +180,15 @@ export function MusicPlayer() {
   const normalizerRef = useRef<DynamicsCompressorNode | null>(null)
   // hls.js instance for native Rutube HLS playback (see rtUseEmbed below).
   const hlsRef = useRef<Hls | null>(null)
+  // v1.7.4: background continuation for video tracks (see the big comment near
+  // enterBgFallback below). Chromium pauses <video> when the page hides while
+  // <audio> keeps playing — so on hide we hand playback to a hidden <audio>
+  // element fed by the same HLS stream / file, and sync back on return.
+  const bgAudioRef = useRef<HTMLAudioElement | null>(null)
+  const bgHlsRef = useRef<Hls | null>(null)
+  const bgFallbackRef = useRef(false)
+  const bgResumePosRef = useRef(0)
+  const rtMasterUrlRef = useRef<string>("")
 
   const ensureAudioGraph = useCallback(
     (forVideo: boolean) => {
@@ -594,6 +603,7 @@ export function MusicPlayer() {
     if (!vid) return
     let cancelled = false
     const src = `/api/video-stream?id=${encodeURIComponent(vid)}`
+    rtMasterUrlRef.current = src // v1.7.4: reusable by the bg-audio fallback
 
     const startPlay = () => {
       if (cancelled) return
@@ -628,6 +638,7 @@ export function MusicPlayer() {
         cancelled = true
         hls.destroy()
         if (hlsRef.current === hls) hlsRef.current = null
+        rtMasterUrlRef.current = "" // v1.7.4: never reuse a stale master across tracks
       }
     }
 
@@ -644,6 +655,7 @@ export function MusicPlayer() {
         video.removeEventListener("loadedmetadata", onMeta)
         video.removeEventListener("error", onErr)
         video.removeAttribute("src")
+        rtMasterUrlRef.current = "" // v1.7.4: never reuse a stale master across tracks
       }
     }
 
@@ -740,7 +752,15 @@ export function MusicPlayer() {
       return
     }
     // Video tracks use their own visible <video> element (with controls).
+    // v1.7.4: while the bg-audio fallback is active (page hidden), toggle the
+    // hidden audio element instead of the <video> Chromium refuses to run.
     if (currentTrack?.isVideo) {
+      if (bgFallbackRef.current && bgAudioRef.current) {
+        const bg = bgAudioRef.current
+        if (bg.paused) bg.play().catch(() => {})
+        else bg.pause()
+        return
+      }
       const video = videoRef.current
       if (!video) return
       if (video.paused) {
@@ -904,6 +924,12 @@ export function MusicPlayer() {
         setProgress(value)
         return
       }
+      // v1.7.4: while the bg-audio fallback is active, seek the hidden audio.
+      if (bgFallbackRef.current && bgAudioRef.current) {
+        try { bgAudioRef.current.currentTime = value } catch {}
+        setProgress(value)
+        return
+      }
       const media = currentTrack?.isVideo ? videoRef.current : audioRef.current
       if (!media || !Number.isFinite(media.duration)) return
       media.currentTime = value
@@ -914,8 +940,8 @@ export function MusicPlayer() {
 
 
   // ---- Media Session API + Wheel volume ----
-  const latestRef = useRef({ currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef })
-  useEffect(() => { latestRef.current = { currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef } })
+  const latestRef = useRef({ currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef, repeatMode, rtUseEmbed, handleEnded })
+  useEffect(() => { latestRef.current = { currentTrack, isPlaying, playPrev, playNext, seek, audioRef, videoRef, previewAudioRef, repeatMode, rtUseEmbed, handleEnded } })
   const getActiveMedia = useCallback(() => { const { currentTrack, audioRef, videoRef } = latestRef.current; if (currentTrack?.isVideo) return videoRef.current; return audioRef.current }, [])
   const updateMediaSession = useCallback(() => { const t = currentTrack; if (!t) { mediaSessionApi.setMetadata({ title: "", artist: "", album: "", artwork: [] }); return } mediaSessionApi.setMetadata({ title: t.title, artist: t.artist, album: t.album || "7-Sonata", artwork: t.coverImage ? [{ src: t.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: t.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }) }, [currentTrack])
   // Register MediaSession action handlers — kept intentionally simple: the
@@ -927,6 +953,13 @@ export function MusicPlayer() {
     const actions = ["play", "pause", "previoustrack", "nexttrack", "seekbackward", "seekforward", "seekto"] as const
     const h: Record<string, (d: any) => void> = {
       play: () => {
+        // v1.7.4: while the bg-audio fallback is active (page hidden), the
+        // media-session controls the hidden audio element — resuming the
+        // <video> would be blocked by Chromium while the page is not visible.
+        if (bgFallbackRef.current && bgAudioRef.current) {
+          bgAudioRef.current.play().then(() => mediaSessionApi.setPlaybackState("playing")).catch(() => {})
+          return
+        }
         const t = latestRef.current.currentTrack
         if (t?.isVideo && isRutubeUrl(t.url) && rtUseEmbed) {
           rtCommand("play")
@@ -939,6 +972,11 @@ export function MusicPlayer() {
         } else mediaSessionApi.setPlaybackState("playing")
       },
       pause: () => {
+        if (bgFallbackRef.current && bgAudioRef.current) {
+          bgAudioRef.current.pause()
+          mediaSessionApi.setPlaybackState("paused")
+          return
+        }
         const t = latestRef.current.currentTrack
         if (t?.isVideo && isRutubeUrl(t.url) && rtUseEmbed) {
           rtCommand("pause")
@@ -962,18 +1000,180 @@ export function MusicPlayer() {
   useEffect(() => { updateMediaSession() }, [updateMediaSession])
   useEffect(() => { mediaSessionApi.setPlaybackState(isPlaying ? "playing" : "paused") }, [isPlaying, currentTrack?.url])
   useEffect(() => { if (!currentTrack?.url) return; mediaSessionApi.setMetadata({ title: currentTrack.title, artist: currentTrack.artist, album: currentTrack.album || "7-Sonata", artwork: currentTrack.coverImage ? [{ src: currentTrack.coverImage, sizes: "256x256", type: "image/jpeg" }, { src: currentTrack.coverImage, sizes: "512x512", type: "image/jpeg" }] : [] }); if (isPlaying) mediaSessionApi.setPlaybackState("playing") }, [currentTrack?.url])
-  useEffect(() => { const m = currentTrack?.isVideo ? videoRef.current : audioRef.current; if (!m || !Number.isFinite(m.duration)) return; try { mediaSessionApi.setPositionState({ duration: m.duration, position: m.currentTime, playbackRate: 1 }) } catch {} }, [progress, currentTrack?.isVideo])
+  useEffect(() => { const m = bgFallbackRef.current ? bgAudioRef.current : currentTrack?.isVideo ? videoRef.current : audioRef.current; if (!m || !Number.isFinite(m.duration)) return; try { mediaSessionApi.setPositionState({ duration: m.duration, position: m.currentTime, playbackRate: 1 }) } catch {} }, [progress, currentTrack?.isVideo])
   // Wheel volume
   const [volumePopup, setVolumePopup] = useState<{ visible: boolean; value: number }>({ visible: false, value: 0 })
   const volumePopupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const showVolumePopup = useCallback((v: number) => { setVolumePopup({ visible: true, value: v }); if (volumePopupTimerRef.current) clearTimeout(volumePopupTimerRef.current); volumePopupTimerRef.current = setTimeout(() => setVolumePopup((p) => ({ ...p, visible: false })), 800) }, [])
   const volumeRef = useRef(volume); useEffect(() => { volumeRef.current = volume }, [volume])
+  const mutedRef = useRef(muted); useEffect(() => { mutedRef.current = muted }, [muted])
   const playerCardRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => { const el = playerCardRef.current; if (!el) return; const onWheel = (e: WheelEvent) => { if (e.deltaY === 0) return; const t = e.target as HTMLElement; if (t.closest("[data-no-wheel-volume]")) return; e.preventDefault(); const d = e.deltaY < 0 ? 0.05 : -0.05; const n = Math.max(0, Math.min(1, volumeRef.current + d)); if (n > 0) setMuted(false); setVolume(n); showVolumePopup(n) }; el.addEventListener("wheel", onWheel, { passive: false }); return () => el.removeEventListener("wheel", onWheel) }, [showVolumePopup])
 
   const cycleRepeat = useCallback(() => {
     setRepeatMode((m) => (m === "off" ? "all" : m === "all" ? "one" : "off"))
   }, [])
+
+  // ---- v1.7.4: background continuation for video tracks ----
+  // Chromium pauses <video> the moment the page/app is hidden (mobile Chrome
+  // and Android WebView both do it), while <audio> keeps playing. When the
+  // page hides while a video is playing we hand playback to a hidden <audio>
+  // element fed by the same HLS master manifest (or the same file, for local
+  // videos) — hls.js happily plays muxed video+audio HLS through <audio> —
+  // and on return we sync the position back onto the <video>.
+  const stopBgAudio = useCallback(() => {
+    const bg = bgAudioRef.current
+    if (bg) {
+      bg.onplay = null
+      bg.onpause = null
+      bg.ontimeupdate = null
+      bg.onended = null
+      bg.onloadedmetadata = null
+      bg.onerror = null
+      try { bg.pause() } catch {}
+      try { bg.removeAttribute("src"); bg.load() } catch {}
+    }
+    if (bgHlsRef.current) {
+      try { bgHlsRef.current.destroy() } catch {}
+      bgHlsRef.current = null
+    }
+    bgFallbackRef.current = false
+  }, [])
+
+  const enterBgFallback = useCallback(() => {
+    if (bgFallbackRef.current) return
+    if (typeof document !== "undefined" && !document.hidden) return // only when actually hidden
+    const L = latestRef.current
+    const t = L.currentTrack
+    if (!t?.isVideo || !L.isPlaying) return
+    // Rutube iframe embed: its audio lives in a cross-origin document — not
+    // capturable. Nothing we can do there (same behavior as before).
+    if (t && isRutubeUrl(t.url) && L.rtUseEmbed) return
+    const video = videoRef.current
+    if (!video) return
+    const pos = video.currentTime || progressRef.current || 0
+    bgFallbackRef.current = true // set BEFORE pausing — JSX onPause guard reads it
+    bgResumePosRef.current = pos
+    try { video.pause() } catch {}
+    let bg = bgAudioRef.current
+    if (!bg) {
+      bg = document.createElement("audio")
+      bg.preload = "auto"
+      bgAudioRef.current = bg
+    }
+    const el = bg
+    el.volume = mutedRef.current ? 0 : volumeRef.current
+    el.onplay = () => setIsPlaying(true)
+    el.onpause = () => setIsPlaying(false)
+    el.ontimeupdate = () => {
+      const v = el.currentTime
+      if (Math.abs(v - progressRef.current) > 0.25) {
+        progressRef.current = v
+        setProgress(v)
+      }
+    }
+    el.onended = () => {
+      const LL = latestRef.current
+      // Repeat-one: loop the background audio itself (playing the <video>
+      // while hidden would be blocked by Chromium).
+      if (bgFallbackRef.current && LL.repeatMode === "one" && bgAudioRef.current) {
+        bgAudioRef.current.currentTime = 0
+        bgAudioRef.current.play().catch(() => {})
+        return
+      }
+      LL.handleEnded()
+    }
+    el.onerror = () => stopBgAudio()
+    const startAt = () => {
+      const seekAndPlay = () => {
+        try { el.currentTime = bgResumePosRef.current } catch {}
+        el.play().catch(() => {})
+      }
+      if (el.readyState >= 1) seekAndPlay()
+      else el.addEventListener("loadedmetadata", seekAndPlay, { once: true })
+    }
+    if (isRutubeUrl(t.url)) {
+      // The HLS effect sets rtMasterUrlRef synchronously per track.
+      const master = rtMasterUrlRef.current
+      if (!master) { stopBgAudio(); return }
+      if (Hls.isSupported()) {
+        const h = new Hls({ enableWorker: true, maxBufferLength: 30 })
+        bgHlsRef.current = h
+        h.loadSource(master)
+        h.attachMedia(el)
+        h.on(Hls.Events.MANIFEST_PARSED, () => { if (bgFallbackRef.current) startAt() })
+        h.on(Hls.Events.ERROR, (_evt, data) => { if (data.fatal && bgFallbackRef.current) stopBgAudio() })
+      } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
+        el.src = master
+        startAt()
+      } else {
+        stopBgAudio()
+      }
+    } else {
+      // Local (uploaded) video: an <audio> element decodes the container's
+      // audio track from the very same blob/file URL.
+      const src = video.currentSrc || video.src || t.url
+      if (!src) { stopBgAudio(); return }
+      el.src = src
+      startAt()
+    }
+    // Watchdog: if the stream never produces audio, drop the fallback.
+    setTimeout(() => {
+      if (bgFallbackRef.current && el.currentTime < 0.5 && el.readyState === 0) stopBgAudio()
+    }, 12000)
+  }, [stopBgAudio])
+
+  const exitBgFallback = useCallback(() => {
+    if (!bgFallbackRef.current) return
+    const bg = bgAudioRef.current
+    const pos = bg && bg.currentTime > 1 ? bg.currentTime : bgResumePosRef.current
+    const wasPlaying = !!latestRef.current.isPlaying
+    stopBgAudio()
+    const t = latestRef.current.currentTrack
+    const video = videoRef.current
+    if (!video || !t?.isVideo) return
+    try { video.currentTime = pos } catch {}
+    if (wasPlaying) {
+      video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false))
+    }
+  }, [stopBgAudio])
+
+  useEffect(() => {
+    let lateRecheck: ReturnType<typeof setTimeout> | null = null
+    const onVis = () => {
+      if (document.visibilityState === "hidden") {
+        enterBgFallback()
+        // Chromium pauses <video> around the same moment as the visibility
+        // flip; a late re-check covers the race where the pause landed first.
+        if (lateRecheck) clearTimeout(lateRecheck)
+        lateRecheck = setTimeout(() => {
+          if (document.hidden) enterBgFallback()
+        }, 500)
+      } else {
+        if (lateRecheck) { clearTimeout(lateRecheck); lateRecheck = null }
+        exitBgFallback()
+      }
+    }
+    document.addEventListener("visibilitychange", onVis)
+    return () => {
+      if (lateRecheck) clearTimeout(lateRecheck)
+      document.removeEventListener("visibilitychange", onVis)
+      stopBgAudio()
+    }
+  }, [enterBgFallback, exitBgFallback, stopBgAudio])
+
+  // Track switched while hidden (media-session next/prev): tear down the old
+  // bg audio and, if the new track is a video, re-engage the fallback once
+  // its HLS effect had a moment to run.
+  useEffect(() => {
+    if (bgFallbackRef.current) stopBgAudio()
+    if (typeof document !== "undefined" && document.hidden) {
+      const t = setTimeout(() => {
+        if (document.hidden) enterBgFallback()
+      }, 1500)
+      return () => clearTimeout(t)
+    }
+  }, [currentTrack?.id, stopBgAudio, enterBgFallback])
 
   // ---- Upload ----
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -1969,8 +2169,11 @@ export function MusicPlayer() {
                         setDuration(videoRef.current?.duration ?? 0)
                         setIsLoading(false)
                       }}
-                      onPlay={() => setIsPlaying(true)}
-                      onPause={() => setIsPlaying(false)}
+                      // v1.7.4: ignore play/pause events that Chromium fires on the
+                      // <video> during page hiding — the isPlaying state must keep
+                      // reflecting the logical playback (the bg-audio fallback).
+                      onPlay={() => { if (!bgFallbackRef.current && !document.hidden) setIsPlaying(true) }}
+                      onPause={() => { if (!bgFallbackRef.current && !document.hidden) setIsPlaying(false) }}
                       onEnded={handleEnded}
                     />
                     )}
@@ -2596,7 +2799,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.7.3</span>
+            <span className="shrink-0 text-foreground/50">v1.7.4</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`

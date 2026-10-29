@@ -228,3 +228,27 @@ Stage Summary:
 - play/pause in the shade: fixed at the PendingIntent level (was a plugin bug since v1.6.x — combined toKeyCode flag); Bluetooth/wired PLAY/PAUSE/PLAY_PAUSE keycodes all map to onPlay/onPause handlers
 - shade cover: fixed via CapacitorHttp→base64 data URLs (works for mp3mn + rutube thumbnails + local data URLs); stale-cover clearing added
 - if cover still missing on some CDNs → check footer MS:ERR marker; CapacitorHttp failure falls back to empty artwork (never breaks metadata)
+
+---
+Task ID: 14
+Agent: Z.ai Code (main)
+Task: v1.7.4 — user reports: VIDEO playback stops when the app is minimized/backgrounded on mobile (audio tracks keep playing fine). Also: preview web app was returning 500 (corrupted Turbopack cache — cleared .next, restarted) and footer showed v1.7.2 (bumped to v1.7.3 earlier, then to v1.7.4 now).
+
+Work Log:
+- Root cause: Android WebView/Chromium force-pauses <video> elements when the page/app becomes hidden, while <audio> elements keep playing (that's why music tracks survive backgrounding). No Chromium flag disables this for WebView.
+- Verified the core trick FIRST in desktop Chromium: hls.js CAN feed a muxed video+audio HLS stream into an <audio> element via MSE (BUFFER_CREATED tracks=video,audio, currentTime advances, readyState=4).
+- Fix (music-player.tsx, mirrored in root web + mobile):
+  * enterBgFallback(): on visibilitychange→hidden (or Capacitor App appStateChange isActive=false) while a video is playing — set bgFallbackRef BEFORE pausing the video (JSX onPause guard), remember position, hand playback to a hidden <audio> element fed by the SAME stream: rutube → rtMasterUrlRef master manifest via new Hls() attached to the audio element (async re-resolve with url-token guard if empty); local uploaded video → same blob/file URL (audio element decodes the container's audio track).
+  * exitBgFallback(): on visible — sync position from bg audio back to <video>, resume if it was playing.
+  * bg audio mirrors volume/mute, drives progress/positionState via timeupdate, handles ended (incl. repeat-one looping bg audio), fatal HLS error / 12s watchdog → stopBgAudio().
+  * media-session play/pause/seekto + togglePlay + seek route to the bg element while the fallback is active (Chromium blocks video.play() while hidden).
+  * track change while hidden (shade next/prev): teardown + 1.5s re-engage for a new video track; video onPause/onPlay JSX handlers ignore Chromium's backgrounding events so isPlaying stays truthful.
+  * rtUseEmbed (iframe fallback) videos are NOT capturable — documented no-op.
+- Mobile also got @capacitor/app@8.1.2 (appStateChange = reliable native hide signal; visibilitychange kept for web).
+- Tested end-to-end in Chromium: video @19.8s → hide → bg audio @29.7s playing (video frozen) → show → video resumes @42.5s paused=false, bg audio torn down.
+- Footer v1.7.3 → v1.7.4 (both apps).
+
+Stage Summary:
+- video in background: audio now keeps playing like music tracks; screen returns → video picks up exactly where the audio left off
+- web (mobile Chrome browser) benefits too: same visibilitychange path
+- embed-mode videos (rare DRM/ACL fallback) still stop in background — inherent to the cross-origin iframe, acceptable
