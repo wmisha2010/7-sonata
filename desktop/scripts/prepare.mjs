@@ -77,7 +77,26 @@ if (!existsSync(electronDist)) {
 }
 
 console.log("4/4  electron-builder --win")
-run("npm run dist:win", desktopDir)
+try {
+  run("npm run dist:win", desktopDir)
+} catch (e) {
+  const msg = String(e?.message || e)
+  if (msg.includes("symbolic link") || msg.includes("Символическая ссылка") || msg.includes("не обладает требуемыми правами")) {
+    console.error("\nERROR: electron-builder не смог распаковать инструменты сборки —")
+    console.error("Windows не разрешает создавать символические ссылки без особых прав.")
+    console.error("\nРешение (одно из двух):")
+    console.error("  1) Запусти командную строку ОТ ИМЕНИ АДМИНИСТРАТОРА (Пуск → набери cmd →")
+    console.error("     правой кнопкой → «Запуск от имени администратора») и выполни:")
+    console.error("       cd " + desktopDir)
+    console.error("       npm run dist:win")
+    console.error("     (веб-часть уже собрана — это займёт пару минут)")
+    console.error("  2) Либо один раз включи «Режим разработчика»: Параметры → Обновление и")
+    console.error("     безопасность → Для разработчиков → Режим разработчика. После этого")
+    console.error("     админ не нужен, можно собирать обычной командой npm run desktop:win.")
+    process.exit(1)
+  }
+  throw e
+}
 
 console.log("\n==========================================")
 console.log("Готово! Файлы лежат в: desktop/release/")
