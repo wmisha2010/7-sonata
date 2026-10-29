@@ -166,6 +166,56 @@ export async function resolveRutubeMasterUrl(videoId: string): Promise<string | 
   }
 }
 
+// v1.8.0: FULL master manifest as a local blob: URL — enables the manual
+// quality selector. The signed master is fetched via the native stack (no
+// CORS), every nested URI is rewritten to absolute https, and the result is
+// served to hls.js as a blob:. hls.js then loads the per-variant playlists
+// itself — river-*.rtbcdn.ru / river-*.rutube.ru echo any Origin, so ALL
+// quality tiers load fine in the WebView (the bl.rutube.ru master host
+// itself is the only one without CORS, and the native stack fetched it).
+// Returns null on any failure — the caller falls back to the single
+// ≤720p variant from resolveRutubeMasterUrl.
+export async function resolveRutubeSourceObjectUrl(videoId: string): Promise<string | null> {
+  if (!/^[0-9a-f]{32}$/i.test(videoId)) return null
+  if (!isNativePlatform()) return null // web/desktop use the /api/video-stream proxy master
+  try {
+    const j = (await httpJson(`https://rutube.ru/api/play/options/${videoId}/?i=1`, {
+      ...BASE_HEADERS,
+      "X-Requested-With": "XMLHttpRequest",
+    })) as { video_balancer?: { m3u8?: string } | null }
+    const master = j?.video_balancer?.m3u8
+    if (typeof master !== "string" || !master) return null
+    const text = await httpText(master, { "User-Agent": UA })
+    // Absolutize: plain variant lines AND URI="…" attributes inside tag
+    // lines (#EXT-X-MEDIA / #EXT-X-I-FRAME-STREAM-INF) — relative URIs
+    // cannot resolve against a blob: base.
+    const abs = text
+      .split(/\r?\n/)
+      .map((line0) => {
+        const line = line0.trim()
+        if (!line) return line
+        if (line.startsWith("#")) {
+          return line.replace(/URI="([^"]+)"/g, (orig, uri: string) => {
+            try {
+              return `URI="${new URL(uri, master).toString()}"`
+            } catch {
+              return orig
+            }
+          })
+        }
+        try {
+          return new URL(line, master).toString()
+        } catch {
+          return line
+        }
+      })
+      .join("\n")
+    return URL.createObjectURL(new Blob([abs], { type: "application/vnd.apple.mpegurl" }))
+  } catch {
+    return null
+  }
+}
+
 // Convert a search result into the app's Track shape. isStream: true —
 // same persistence rules as mp3mn streams (permanent remote identity, no blob).
 export function rutubeToTrack(v: RutubeVideo): Track {

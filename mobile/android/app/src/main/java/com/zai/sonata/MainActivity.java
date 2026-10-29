@@ -19,6 +19,9 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // SonataFix v1.8.0: local plugin that pushes track/play state into
+        // the home-screen widget. Must be registered BEFORE super.onCreate.
+        registerPlugin(SonataWidgetPlugin.class);
         super.onCreate(savedInstanceState);
         requestNotificationPermissionIfNeeded();
     }

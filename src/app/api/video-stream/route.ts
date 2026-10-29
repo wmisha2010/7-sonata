@@ -300,7 +300,10 @@ function segResponseFromCache(e: SegEntry, range: string | null, hit: boolean): 
     return new Response(null, { status: 416, headers })
   }
   headers.set("Content-Length", String(len))
-  return new Response(e.data, { status: 200, headers })
+  // .slice() copies into a fresh ArrayBuffer — satisfies BodyInit typing
+  // (Uint8Array<ArrayBufferLike> is not directly assignable) at a negligible
+  // cost for ≤2 MB segments.
+  return new Response(e.data.slice().buffer, { status: 200, headers })
 }
 
 export async function GET(request: Request) {

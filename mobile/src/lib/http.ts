@@ -77,6 +77,24 @@ export async function httpText(url: string, headers?: Headers, timeout = DEFAULT
   return r.text()
 }
 
+// Raw binary (mp3 prefetch, v1.8.0) → Uint8Array. Native: CapacitorHttp
+// returns the payload base64-encoded; web: plain fetch (callers must ensure
+// CORS or route through a same-origin proxy — mp3mn streams need one).
+export async function httpBytes(url: string, headers?: Headers, timeout = DEFAULT_TIMEOUT): Promise<Uint8Array> {
+  if (isNativePlatform()) {
+    const res = await nativeGet(url, headers, timeout, "arraybuffer")
+    const b64 = typeof res.data === "string" ? res.data : ""
+    if (!b64) throw new Error("empty body")
+    const bin = atob(b64)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+    return out
+  }
+  const r = await fetch(url, { headers, cache: "no-store" })
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  return new Uint8Array(await r.arrayBuffer())
+}
+
 // Binary (images) → data: URL, safe for <img> + canvas getImageData
 // (bypasses CORS/canvas-tainting entirely).
 export async function httpBlobAsDataUrl(url: string, timeout = DEFAULT_TIMEOUT): Promise<string> {

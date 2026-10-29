@@ -156,6 +156,50 @@ if "SonataFix(artwork)" not in p:
     sys.exit(1)
 plg.write_text(p)
 print("FIX 2 (artwork):", "applied" if changed2 else "already present")
+
+# ---------- FIX 3: full exit when the task is swiped away ----------
+SVC_ANCHOR = '''    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        MediaButtonReceiver.handleIntent(mediaSession, intent);
+        return super.onStartCommand(intent, flags, startId);
+    }
+'''
+SVC_TASKREMOVED = '''    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        MediaButtonReceiver.handleIntent(mediaSession, intent);
+        return super.onStartCommand(intent, flags, startId);
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // SonataFix(taskremoved): closing the app from recents ("Закрыть all"
+        // or a swipe) must FULLY exit it. This foreground service kept the
+        // process — and with it the WebView audio and the shade notification
+        // — alive after the task was gone, which looked like "the app
+        // refuses to close". Tear everything down: drop the notification,
+        // stop the service, then kill the process so the WebView (and any
+        // still-playing media) dies with it. Plain home/screen-off is NOT
+        // affected — background playback keeps working (v1.7.4).
+        super.onTaskRemoved(rootIntent);
+        stopForeground(true);
+        stopSelf();
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+'''
+
+s = svc.read_text()
+changed3 = False
+if "SonataFix(taskremoved)" not in s:
+    if SVC_ANCHOR not in s:
+        print("GUARD FAILED: onStartCommand anchor not found in MediaSessionService", file=sys.stderr)
+        sys.exit(1)
+    s = s.replace(SVC_ANCHOR, SVC_TASKREMOVED, 1)
+    changed3 = True
+if "SonataFix(taskremoved)" not in s:
+    print("GUARD FAILED: taskremoved fix marker missing after patch", file=sys.stderr)
+    sys.exit(1)
+svc.write_text(s)
+print("FIX 3 (taskremoved):", "applied" if changed3 else "already present")
 PYEOF
 
 # Guard: the app manifest must stay bare — the MediaSessionService and

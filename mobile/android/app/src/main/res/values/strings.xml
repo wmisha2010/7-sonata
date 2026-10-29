@@ -4,4 +4,8 @@
     <string name="title_activity_main">7-Sonata</string>
     <string name="package_name">com.zai.sonata</string>
     <string name="custom_url_scheme">com.zai.sonata</string>
+    <string name="widget_desc">Управление плеером 7-Sonata</string>
+    <string name="widget_prev">Предыдущий трек</string>
+    <string name="widget_toggle">Играть / пауза</string>
+    <string name="widget_next">Следующий трек</string>
 </resources>

@@ -35,6 +35,20 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- SonataFix v1.8.0: home-screen playback widget. The service and
+             MediaButtonReceiver keep coming from the plugin library manifest
+             (do NOT hand-add them here — see patches/apply-mediasession-patches.sh). -->
+        <receiver
+            android:name=".SonataWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/sonata_widget_info" />
+        </receiver>
     </application>
 
     <uses-permission android:name="android.permission.INTERNET" />

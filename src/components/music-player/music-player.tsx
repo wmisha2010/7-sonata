@@ -335,6 +335,28 @@ export function MusicPlayer() {
     setRtUseEmbed(false)
   }, [currentTrack?.id])
 
+  // v1.8.0: manual video quality. rtLevels lists the heights hls.js saw in
+  // the master manifest (populated on MANIFEST_PARSED, shown sorted desc in
+  // the UI); null = Auto (hls.js ABR picks the level). The choice is stored
+  // by HEIGHT — level indexes change from video to video.
+  const [rtLevels, setRtLevels] = useState<{ index: number; height: number }[]>([])
+  const [rtLevelHeight, setRtLevelHeight] = useState<number | null>(null)
+
+  // Apply the chosen quality to the live hls.js instance (nextLevel =
+  // switch at the next fragment — no buffer flush, no stall).
+  useEffect(() => {
+    const h = hlsRef.current
+    if (!h) return
+    if (rtLevelHeight == null) {
+      try { h.nextLevel = -1 } catch { /* instance destroyed */ }
+      return
+    }
+    const idx = rtLevels.find((l) => l.height === rtLevelHeight)?.index
+    if (idx != null) {
+      try { h.nextLevel = idx } catch { /* instance destroyed */ }
+    }
+  }, [rtLevelHeight, rtLevels])
+
   // ---- Theme handling ----
   useEffect(() => {
     const root = document.documentElement
@@ -600,6 +622,13 @@ export function MusicPlayer() {
     if (audioCtxRef.current?.state === "suspended") {
       audioCtxRef.current.resume().catch(() => {})
     }
+    // v1.8.0: if the full track was prefetched earlier, play from the local
+    // blob — instant start, no CDN seek/connect latency. Swapping src here
+    // is safe: the element is about to (re)load from the beginning anyway.
+    const cachedBlob = audioCache.get(currentTrack.id)
+    if (cachedBlob && audio.src !== cachedBlob) {
+      audio.src = cachedBlob
+    }
     audio.load()
     audio.currentTime = 0
     if (shouldAutoPlayRef.current) {
@@ -608,6 +637,65 @@ export function MusicPlayer() {
       if (p) p.then(() => setIsPlaying(true)).catch(() => {})
     }
   }, [currentIndex, currentTrack?.url, currentTrack?.isVideo, isRtHls])
+
+  // v1.8.0: next-track audio prefetch. While a stream track plays, the NEXT
+  // playlist track's full audio is downloaded into a tiny LRU blob cache so
+  // switching to it starts instantly instead of waiting for the CDN
+  // seek+connect. Fetched through the same-origin /api/audio-proxy (mp3mn
+  // sends no CORS headers) — the same stream the <audio> element would load,
+  // just completed ahead of time.
+  const [audioCache, setAudioCache] = useState<Map<string, string>>(new Map())
+  const audioPrefetchInflightRef = useRef<Set<string>>(new Set())
+
+  const fetchAudioBytes = useCallback(async (url: string): Promise<Uint8Array | null> => {
+    try {
+      const r = await fetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`, {
+        signal: AbortSignal.timeout(30000),
+      })
+      if (!r.ok) return null
+      return new Uint8Array(await r.arrayBuffer())
+    } catch {
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!currentTrack || currentTrack.isVideo) return
+    const next = tracks[currentIndex + 1]
+    // NOTE: don't gate on isRemoteMediaUrl — on web the stream URLs are
+    // ALREADY same-origin (proxied), so that check would always be false.
+    // Any non-blob stream URL is prefetchable.
+    if (!next || next.isVideo || !next.isStream || !next.url || next.url.startsWith("blob:") || next.url.startsWith("data:")) return
+    if (audioCache.has(next.id) || audioPrefetchInflightRef.current.has(next.id)) return
+    const id = next.id
+    audioPrefetchInflightRef.current.add(id)
+    void (async () => {
+      try {
+        const bytes = await fetchAudioBytes(originalStreamUrl(next.url))
+        if (bytes && bytes.byteLength > 0) {
+          const blobUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "audio/mpeg" }))
+          setAudioCache((prev) => {
+            const m = new Map(prev)
+            // LRU: keep at most 3 full tracks (~30 MB), revoke the evicted.
+            while (m.size >= 3) {
+              const oldest = m.keys().next().value as string
+              const oldUrl = m.get(oldest)
+              if (oldUrl) {
+                try { URL.revokeObjectURL(oldUrl) } catch { /* gone */ }
+              }
+              m.delete(oldest)
+            }
+            m.set(id, blobUrl)
+            return m
+          })
+        }
+      } catch {
+        /* best-effort prefetch — never disturb playback */
+      } finally {
+        audioPrefetchInflightRef.current.delete(id)
+      }
+    })()
+  }, [currentIndex, currentTrack?.id, currentTrack?.isVideo, tracks, audioCache, fetchAudioBytes])
 
   // Native Rutube HLS playback — the heart of the "visualizer for video"
   // fix. hls.js pulls the manifest/segments through /api/video-stream (our
@@ -622,6 +710,7 @@ export function MusicPlayer() {
     const vid = rutubeId(currentTrack.url)
     if (!vid) return
     let cancelled = false
+    setRtLevels([]) // v1.8.0: fresh quality list per video
     const src = `/api/video-stream?id=${encodeURIComponent(vid)}`
     rtMasterUrlRef.current = src // v1.7.4: reusable by the bg-audio fallback
 
@@ -647,7 +736,19 @@ export function MusicPlayer() {
       hlsRef.current = hls
       hls.loadSource(src)
       hls.attachMedia(video)
-      hls.on(Hls.Events.MANIFEST_PARSED, () => startPlay())
+      hls.on(Hls.Events.MANIFEST_PARSED, (_evt, data) => {
+        // v1.8.0: expose the available heights for the quality selector.
+        try {
+          setRtLevels(
+            data.levels
+              .map((L, i) => ({ index: i, height: L.height ?? 0 }))
+              .filter((l) => l.height > 0)
+          )
+        } catch {
+          setRtLevels([])
+        }
+        startPlay()
+      })
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (cancelled || !data.fatal) return
         // Manifest/segment/network failure — the official embed usually
@@ -2197,6 +2298,35 @@ export function MusicPlayer() {
                       onEnded={handleEnded}
                     />
                     )}
+                    {isRtHls && rtLevels.length > 1 && (
+                      /* v1.8.0: manual video quality — overlay chip, top-right. */
+                      <div className="absolute right-2 top-2 z-30">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              type="button"
+                              title="Качество видео"
+                              className="rounded-lg bg-black/55 px-2.5 py-1.5 text-xs font-semibold text-white shadow-lg backdrop-blur-sm transition hover:bg-black/75"
+                            >
+                              {rtLevelHeight != null ? `${rtLevelHeight}p` : "Авто"}
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="z-50">
+                            <DropdownMenuItem onClick={() => setRtLevelHeight(null)}>
+                              Авто{rtLevelHeight == null ? " ✓" : ""}
+                            </DropdownMenuItem>
+                            {rtLevels
+                              .slice()
+                              .sort((a, b) => b.height - a.height)
+                              .map((l) => (
+                                <DropdownMenuItem key={l.index} onClick={() => setRtLevelHeight(l.height)}>
+                                  {l.height}p{rtLevelHeight === l.height ? " ✓" : ""}
+                                </DropdownMenuItem>
+                              ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    )}
                   </div>
                   {/* Vertical resize handle — hidden on mobile (no room),
                       shown on sm+ so desktop users can drag to resize. */}
@@ -2819,7 +2949,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.7.5</span>
+            <span className="shrink-0 text-foreground/50">v1.8.0</span>
             <span className="truncate">
               {currentTrack
                 ? `· ${currentTrack.title} — ${currentTrack.artist}`
@@ -2929,6 +3059,22 @@ function isRemoteMediaUrl(url?: string | null): boolean {
   } catch {
     return true
   }
+}
+
+// v1.8.0: undo proxiedStreamUrl — when a stream track already points at
+// /api/audio-proxy?url=…, hand the ORIGINAL CDN URL back (the proxy rejects
+// double-proxied requests; native httpBytes doesn't need the proxy at all).
+function originalStreamUrl(url: string): string {
+  try {
+    const u = new URL(url, window.location.href)
+    if (u.pathname === "/api/audio-proxy") {
+      const inner = u.searchParams.get("url")
+      if (inner) return inner
+    }
+  } catch {
+    /* relative or malformed — use as-is */
+  }
+  return url
 }
 
 function roundRect(
