@@ -562,15 +562,15 @@ export function MusicPlayer() {
 
   // A video started (or picked from the drawer) while the shade is open goes
   // to its own little window. When switching from one video to another we
-  // first close the stale PiP window — otherwise the OS keeps showing the
-  // previous clip (or drops PiP entirely) while the new track keeps playing
-  // audio in the background.
+  // first close the stale PiP window and pause the outgoing clip — otherwise
+  // the OS keeps showing the previous clip (or drops PiP entirely) while the
+  // new track keeps playing audio in the background.
   useEffect(() => {
     if (!compact || !currentTrack?.isVideo) return
     exitCompactPip()
     const t = window.setTimeout(() => {
       if (compact && currentTrack?.isVideo) enterCompactPip()
-    }, 1000)
+    }, 600)
     return () => window.clearTimeout(t)
   }, [compact, currentTrack?.isVideo, currentTrack?.id, enterCompactPip, exitCompactPip])
 
@@ -1083,10 +1083,17 @@ export function MusicPlayer() {
         return
       }
       // Different track — auto-play it
+      // In compact mode stop the outgoing clip (and its PiP window) before
+      // the new track takes over, so the old audio never bleeds through.
+      if (compact && currentTrack?.isVideo) {
+        exitCompactPip()
+        if (isRtEmbed) rtCommand("pause")
+        else videoRef.current?.pause()
+      }
       shouldAutoPlayRef.current = true
       selectTrack(index)
     },
-    [selectTrack, currentIndex, currentTrack?.isVideo, previewTrack]
+    [selectTrack, currentIndex, currentTrack?.isVideo, previewTrack, compact, isRtEmbed, exitCompactPip, rtCommand]
   )
 
   // Stable for the whole playback session (it changes only when the playlist
@@ -1098,6 +1105,13 @@ export function MusicPlayer() {
   )
 
   const playNext = useCallback(() => {
+    // Compact mode: stop the outgoing clip/PiP before advancing, so its
+    // audio never bleeds into the next track.
+    if (compact && currentTrack?.isVideo && !previewTrack) {
+      exitCompactPip()
+      if (isRtEmbed) rtCommand("pause")
+      else videoRef.current?.pause()
+    }
     // Search-result preview is active → iterate through searchResults,
     // NOT through the playlist. Otherwise the user clicks a search result
     // and the Next button jumps to a totally unrelated playlist track.
@@ -1153,9 +1167,14 @@ export function MusicPlayer() {
     if (realIdx === -1) return
     shouldAutoPlayRef.current = true
     selectTrack(realIdx)
-  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack, previewTrack, searchResults, repeatMode])
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack, previewTrack, searchResults, repeatMode, compact, currentTrack?.isVideo, isRtEmbed, exitCompactPip, rtCommand])
 
   const playPrev = useCallback(() => {
+    if (compact && currentTrack?.isVideo && !previewTrack) {
+      exitCompactPip()
+      if (isRtEmbed) rtCommand("pause")
+      else videoRef.current?.pause()
+    }
     // Search-result preview is active → iterate through searchResults.
     if (previewTrack) {
       if (searchResults.length === 0) return
@@ -1184,7 +1203,7 @@ export function MusicPlayer() {
     if (realIdx === -1) return
     shouldAutoPlayRef.current = true
     selectTrack(realIdx)
-  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack, previewTrack, searchResults])
+  }, [shuffle, currentIndex, tracks, sortedTracks, selectTrack, previewTrack, searchResults, compact, currentTrack?.isVideo, isRtEmbed, exitCompactPip, rtCommand])
 
   const togglePlay = useCallback(() => {
     // Rutube embeds are controlled via postMessage commands; native HLS
