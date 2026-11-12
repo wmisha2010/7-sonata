@@ -3716,7 +3716,7 @@ function CompactPlayer({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-2 backdrop-blur-md">
-      <div className="isolate relative flex max-h-[92vh] w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0d0d11] text-foreground shadow-2xl">
+      <div className="isolate relative flex max-h-[92vh] w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0d0d11] text-white shadow-2xl">
         {/* Same colour treatment as the full player: the cover, blurred,
             washed with the track's gradient. */}
         {track?.coverImage && (
@@ -3742,14 +3742,14 @@ function CompactPlayer({
         <div className="flex h-[26px] shrink-0 items-center justify-between border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent pl-2.5 pr-1">
           <div className="flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentFrom }} />
-            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-foreground/70">
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/70">
               7-Sonata
             </span>
           </div>
           <button
             type="button"
             onClick={onExpand}
-            className="grid h-5 w-5 place-items-center rounded text-foreground/60 transition hover:bg-white/10 hover:text-foreground"
+            className="grid h-5 w-5 place-items-center rounded text-white/60 transition hover:bg-white/10 hover:text-white"
             aria-label="Развернуть окно"
             title="Свернуть"
           >
@@ -3786,7 +3786,7 @@ function CompactPlayer({
               </p>
               <div className="mt-0.5 flex items-baseline gap-1">
                 <p
-                  className="min-w-0 flex-1 truncate text-[10px] leading-tight text-foreground/50"
+                  className="min-w-0 flex-1 truncate text-[10px] leading-tight text-white/50"
                   title={track ? `${track.artist} · ${track.album}` : ""}
                 >
                   {track ? `${track.artist}${track.album ? ` · ${track.album}` : ""}` : ""}
@@ -3797,7 +3797,7 @@ function CompactPlayer({
                 >
                   {formatTime(progress)}
                 </span>
-                <span className="shrink-0 text-[9px] leading-none tabular-nums text-foreground/35">
+                <span className="shrink-0 text-[9px] leading-none tabular-nums text-white/35">
                   / {formatTime(duration)}
                 </span>
               </div>
@@ -3828,7 +3828,7 @@ function CompactPlayer({
             variant="ghost"
             size="icon"
             onClick={onPrev}
-            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+            className="h-8 w-8 text-white/75 hover:text-white"
             aria-label="Предыдущий трек"
             title="Предыдущий трек"
           >
@@ -3849,7 +3849,7 @@ function CompactPlayer({
             variant="ghost"
             size="icon"
             onClick={onNext}
-            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+            className="h-8 w-8 text-white/75 hover:text-white"
             aria-label="Следующий трек"
             title="Следующий трек"
           >
@@ -3859,7 +3859,7 @@ function CompactPlayer({
             variant="ghost"
             size="icon"
             onClick={onToggleMute}
-            className="h-8 w-8 text-foreground/60 hover:text-foreground"
+            className="h-8 w-8 text-white/60 hover:text-white"
             aria-label={muted ? "Включить звук" : "Выключить звук"}
             title={muted ? "Включить звук" : "Выключить звук"}
           >
@@ -3883,7 +3883,7 @@ function CompactPlayer({
               aria-label="Перемешивание"
               title="Перемешивание"
             >
-              <Shuffle className={cn("h-3.5 w-3.5", !shuffle && "text-foreground/40")} />
+              <Shuffle className={cn("h-3.5 w-3.5", !shuffle && "text-white/40")} />
             </button>
             <button
               type="button"
@@ -3894,9 +3894,9 @@ function CompactPlayer({
               title={repeatTitle}
             >
               {repeatMode === "one" ? (
-                <Repeat1 className={cn("h-3.5 w-3.5", !repeatActive && "text-foreground/40")} />
+                <Repeat1 className={cn("h-3.5 w-3.5", !repeatActive && "text-white/40")} />
               ) : (
-                <Repeat className={cn("h-3.5 w-3.5", !repeatActive && "text-foreground/40")} />
+                <Repeat className={cn("h-3.5 w-3.5", !repeatActive && "text-white/40")} />
               )}
             </button>
             <button
@@ -3904,7 +3904,7 @@ function CompactPlayer({
               onClick={onTogglePlaylist}
               className={cn(
                 "grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5",
-                playlistOpen ? "text-foreground" : "text-foreground/45 hover:text-foreground/80"
+                playlistOpen ? "text-white" : "text-white/45 hover:text-white/80"
               )}
               style={{ color: playlistOpen ? accentFrom : undefined }}
               aria-pressed={playlistOpen}
@@ -3920,7 +3920,7 @@ function CompactPlayer({
         {playlistOpen && (
           <div className="custom-scroll min-h-0 max-h-[240px] overflow-y-auto border-t border-white/10">
             {tracks.length === 0 ? (
-              <p className="px-3 py-6 text-center text-[11px] text-foreground/40">Плейлист пуст</p>
+              <p className="px-3 py-6 text-center text-[11px] text-white/40">Плейлист пуст</p>
             ) : (
               tracks.map((tr, i) => {
                 const active = tr.id === currentTrackId
@@ -3934,7 +3934,7 @@ function CompactPlayer({
                       active && "bg-white/[0.07]"
                     )}
                   >
-                    <span className="w-4 shrink-0 text-right text-[9px] tabular-nums text-foreground/30">
+                    <span className="w-4 shrink-0 text-right text-[9px] tabular-nums text-white/30">
                       {i + 1}
                     </span>
                     <span
@@ -3944,10 +3944,10 @@ function CompactPlayer({
                       }}
                     />
                     <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{tr.title}</span>
-                    <span className="min-w-0 max-w-[92px] shrink-0 truncate text-[10px] text-foreground/40">
+                    <span className="min-w-0 max-w-[92px] shrink-0 truncate text-[10px] text-white/40">
                       {tr.artist}
                     </span>
-                    <span className="shrink-0 text-[10px] tabular-nums text-foreground/35">
+                    <span className="shrink-0 text-[10px] tabular-nums text-white/35">
                       {formatTime(tr.duration)}
                     </span>
                   </button>
