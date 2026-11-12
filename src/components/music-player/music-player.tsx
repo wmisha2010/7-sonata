@@ -141,7 +141,7 @@ interface SonataDesktopApi {
   setMiniMode?: (on: boolean) => Promise<boolean> | void
   getMiniMode?: () => Promise<boolean> | void
   setMiniSize?: (height: number) => Promise<boolean> | void
-  windowAction?: (action: "minimize" | "maximize" | "close") => Promise<boolean> | void
+  windowAction?: (action: "minimize" | "maximize" | "tray" | "close") => Promise<boolean> | void
 }
 
 function desktopApi(): SonataDesktopApi | undefined {
@@ -588,7 +588,7 @@ export function MusicPlayer() {
     if (compact) return
     exitCompactPip()
   }, [compact, exitCompactPip])
-  const windowAction = useCallback((action: "minimize" | "maximize" | "close") => {
+  const windowAction = useCallback((action: "minimize" | "maximize" | "tray" | "close") => {
     void desktopApi()?.windowAction?.(action)
   }, [])
   useEffect(() => {
@@ -617,6 +617,17 @@ export function MusicPlayer() {
     if (!compact) return
     void desktopApi()?.setMiniSize?.(compactPlaylist ? 396 : 172)
   }, [compact, compactPlaylist])
+
+  // The shade window is per-pixel transparent (see desktop/electron/main.cjs),
+  // so the rounded panel corners and its translucent surface show the desktop.
+  // The page keeps rendering underneath (playback must not restart), but it
+  // goes invisible while the shade is up — see .sonata-compact-shell in
+  // globals.css.
+  useEffect(() => {
+    if (!framelessShell) return
+    document.body.classList.toggle("sonata-transparent-shell", compact)
+    return () => document.body.classList.remove("sonata-transparent-shell")
+  }, [framelessShell, compact])
 
   // ---- Restore the user's saved library on mount ----
   useEffect(() => {
@@ -2372,6 +2383,9 @@ export function MusicPlayer() {
     <div
       className={cn(
         "relative flex min-h-screen flex-col overflow-x-hidden bg-background text-foreground transition-colors duration-700",
+        // Frameless shade: the window is transparent and only the compact
+        // panel may paint pixels.
+        framelessShell && compact && "sonata-compact-shell",
         isDragOver && "ring-2 ring-inset ring-violet-400 dark:ring-emerald-400"
       )}
       onDragOver={(e) => {
@@ -3396,6 +3410,7 @@ export function MusicPlayer() {
           onToggleShuffle={() => setShuffle((s) => !s)}
           onCycleRepeat={() => setRepeatMode((m) => (m === "off" ? "all" : m === "all" ? "one" : "off"))}
           onExpand={exitCompact}
+          onHideToTray={() => windowAction("tray")}
           onClose={() => {
             // Quit exactly as-is: the desktop shell remembers the shade and
             // reopens the app in it next time.
@@ -3571,6 +3586,7 @@ function CompactPlayer({
   onToggleShuffle,
   onCycleRepeat,
   onExpand,
+  onHideToTray,
   onClose,
 }: {
   track: Track | null
@@ -3601,9 +3617,47 @@ function CompactPlayer({
   onToggleShuffle: () => void
   onCycleRepeat: () => void
   onExpand: () => void
+  onHideToTray: () => void
   onClose: () => void
 }) {
   const pct = duration > 0 ? Math.min(100, Math.max(0, (progress / duration) * 100)) : 0
+  // Wheel over the bar changes the volume (5% per notch) — the Winamp habit.
+  // The playlist drawer keeps its own scrolling.
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const volumeStateRef = useRef({ volume, muted })
+  useEffect(() => {
+    volumeStateRef.current = { volume, muted }
+  }, [volume, muted])
+  const volumeChangeRef = useRef(onVolumeChange)
+  useEffect(() => {
+    volumeChangeRef.current = onVolumeChange
+  }, [onVolumeChange])
+  // Several wheel notches can arrive before React re-renders — accumulate on
+  // the last value we asked for, otherwise fast scrolling drops steps.
+  const pendingVolumeRef = useRef<number | null>(null)
+  const pendingVolumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    const el = panelRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return
+      const target = e.target as HTMLElement | null
+      if (target?.closest("[data-scroll-region]")) return
+      e.preventDefault()
+      const { volume: current, muted: isMuted } = volumeStateRef.current
+      const step = e.deltaY < 0 ? 0.05 : -0.05
+      const base = pendingVolumeRef.current ?? (isMuted ? 0 : current)
+      const next = Math.max(0, Math.min(1, base + step))
+      pendingVolumeRef.current = next
+      if (pendingVolumeTimerRef.current) clearTimeout(pendingVolumeTimerRef.current)
+      pendingVolumeTimerRef.current = setTimeout(() => {
+        pendingVolumeRef.current = null
+      }, 400)
+      volumeChangeRef.current(next)
+    }
+    el.addEventListener("wheel", onWheel, { passive: false })
+    return () => el.removeEventListener("wheel", onWheel)
+  }, [])
   const repeatActive = repeatMode !== "off"
   const repeatTitle =
     repeatMode === "off" ? "Повтор выключен" : repeatMode === "all" ? "Повтор всего списка" : "Повтор одной"
@@ -3616,18 +3670,21 @@ function CompactPlayer({
 
   return (
     <div
+      data-compact-overlay
       className={cn(
         "fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-2 backdrop-blur-md",
         // In the frameless desktop window the bar IS the window: no page
-        // margin, no translucent gutter — otherwise strips of the page
-        // underneath show around the edges.
-        frameless && "bg-[#08080b] p-0 backdrop-blur-none"
+        // margin, no translucent gutter — only the rounded panel may paint.
+        frameless && "bg-transparent p-0 backdrop-blur-none"
       )}
     >
       <div
+        ref={panelRef}
         className={cn(
-          "isolate relative flex w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0d0d11] text-white shadow-2xl",
-          frameless && "h-full max-w-none rounded-none border-0 shadow-none"
+          // Translucent surface: the artwork/gradient layers below stay semi
+          // transparent, so the desktop shows through the shade.
+          "isolate relative flex w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/15 bg-[#0d0d11]/85 text-white shadow-2xl backdrop-blur-xl",
+          frameless && "h-full max-w-none rounded-xl shadow-none"
         )}
       >
         {/* Same colour treatment as the full player: the cover, blurred,
@@ -3635,7 +3692,7 @@ function CompactPlayer({
         {track?.coverImage && (
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-0 -z-10 opacity-50"
+            className="pointer-events-none absolute inset-0 -z-10 opacity-35"
             style={{
               backgroundImage: `url(${track.coverImage})`,
               backgroundSize: "cover",
@@ -3649,7 +3706,7 @@ function CompactPlayer({
           aria-hidden
           className="pointer-events-none absolute inset-0 -z-10"
           style={{
-            background: `linear-gradient(180deg, ${accentTo}1f 0%, #0d0d11e6 45%, #0d0d11f7 100%)`,
+            background: `linear-gradient(180deg, ${accentTo}26 0%, rgba(13,13,17,0.72) 45%, rgba(13,13,17,0.86) 100%)`,
           }}
         />
         {/* Title bar — drag area; window buttons keep working because the
@@ -3672,6 +3729,17 @@ function CompactPlayer({
             >
               <Maximize2 className="h-3 w-3" />
             </button>
+            {frameless && (
+              <button
+                type="button"
+                onClick={onHideToTray}
+                className="grid h-5 w-5 place-items-center rounded text-white/60 transition hover:bg-white/10 hover:text-white"
+                aria-label="Свернуть в трей"
+                title="Свернуть в трей"
+              >
+                <Minus className="h-3 w-3" />
+              </button>
+            )}
             {frameless && (
               <button
                 type="button"
@@ -3850,6 +3918,7 @@ function CompactPlayer({
         {/* Playlist drawer */}
         {playlistOpen && (
           <div
+            data-scroll-region
             className={cn(
               "custom-scroll min-h-0 overflow-y-auto border-t border-white/10",
               frameless ? "flex-1" : "max-h-[240px]"

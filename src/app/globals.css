@@ -121,6 +121,21 @@
   }
 }
 
+/* ---- Frameless compact window (Electron) ---- */
+/* The shade window is transparent so its rounded corners are real corners and
+   its translucent surface shows the desktop behind it. The page underneath
+   stays mounted (playback must not restart) but paints nothing except the
+   compact panel itself. */
+body.sonata-transparent-shell {
+  background: transparent !important;
+}
+.sonata-compact-shell {
+  background: transparent !important;
+}
+.sonata-compact-shell > :not([data-compact-overlay]) {
+  visibility: hidden !important;
+}
+
 /* ---- Music player animations ---- */
 @keyframes spin-slow {
   to {

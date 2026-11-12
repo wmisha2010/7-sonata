@@ -6,7 +6,7 @@
 // ELECTRON_RUN_AS_NODE) and open it in a native window. This way every app
 // feature — MP3mn search, Rutube video proxy, quality selector, downloads —
 // works locally with no hosted backend.
-const { app, BrowserWindow, shell, dialog, ipcMain } = require("electron")
+const { app, BrowserWindow, shell, dialog, ipcMain, Tray, Menu, nativeImage } = require("electron")
 const { spawn } = require("node:child_process")
 const path = require("node:path")
 const fs = require("node:fs")
@@ -279,6 +279,7 @@ ipcMain.handle("sonata:window", (event, action) => {
   if (!win || win.isDestroyed()) return false
   if (action === "minimize") win.minimize()
   else if (action === "maximize") win.isMaximized() ? win.unmaximize() : win.maximize()
+  else if (action === "tray") hideToTray()
   else if (action === "close") win.close()
   return true
 })
@@ -314,6 +315,73 @@ ipcMain.handle("sonata:mini-mode", (event, on) => {
   persistWindowState()
   return true
 })
+
+// ---- tray ---------------------------------------------------------------
+// "Свернуть в трей": the window hides, the embedded server and playback keep
+// running, and the tray icon (click or menu) brings the player back.
+let tray = null
+// Set while the user keeps the player in the tray — the launch safety net must
+// not pop the window back up during the first seconds after a start.
+let hiddenToTray = false
+
+async function trayIconImage() {
+  // Packaged: the exe carries the app icon — Electron can extract it.
+  try {
+    const icon = await app.getFileIcon(process.execPath, { size: "small" })
+    if (icon && !icon.isEmpty()) return icon
+  } catch {
+    /* fall through */
+  }
+  // Dev (`electron .`): the build icon sits next to the electron folder.
+  try {
+    const img = nativeImage.createFromPath(path.join(__dirname, "..", "build", "icon.png"))
+    if (!img.isEmpty()) return img.resize({ width: 16, height: 16 })
+  } catch {
+    /* no icon */
+  }
+  return null
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  hiddenToTray = false
+  if (!mainWindow.isVisible()) mainWindow.show()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.focus()
+}
+
+function hideToTray() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  hiddenToTray = true
+  log("tray: window hidden")
+  mainWindow.hide()
+}
+
+async function createTray() {
+  if (tray) return
+  const icon = await trayIconImage()
+  if (!icon) {
+    log("tray: no icon available, skipping tray icon")
+    return
+  }
+  try {
+    tray = new Tray(icon)
+    tray.setToolTip("7-Sonata")
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: "Показать 7-Sonata", click: showMainWindow },
+        { label: "Скрыть в трей", click: hideToTray },
+        { type: "separator" },
+        { label: "Выход", click: () => { quitting = true; killServer(); app.quit() } },
+      ]),
+    )
+    tray.on("click", showMainWindow)
+    tray.on("double-click", showMainWindow)
+    log("tray: icon ready")
+  } catch (e) {
+    log(`tray: failed to create — ${e?.message || e}`)
+  }
+}
 
 // ---- window ----
 async function createWindow() {
@@ -369,7 +437,10 @@ async function createWindow() {
     frame: false,
     autoHideMenuBar: true,
     title: "7-Sonata",
-    backgroundColor: "#09090b",
+    // Per-pixel alpha: the shade panel is semi-transparent with rounded
+    // corners, so the desktop shows through the corners and the surface.
+    transparent: true,
+    backgroundColor: "#00000000",
     icon: app.isPackaged ? undefined : path.join(__dirname, "..", "build", "icon.png"),
     webPreferences: {
       contextIsolation: true,
@@ -423,7 +494,7 @@ async function createWindow() {
 
   // Safety net: never leave the user with an invisible window.
   setTimeout(() => {
-    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible() && !hiddenToTray) {
       log("window still hidden 10 s after load — showing anyway")
       mainWindow.show()
     }
@@ -450,11 +521,9 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
+  // Launching the exe again while the player sits in the tray brings it back.
   app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-    }
+    showMainWindow()
   })
   app.whenReady().then(async () => {
     truncateLog()
@@ -465,6 +534,7 @@ if (!gotLock) {
     if (gpuDisabled) log("GPU disabled: safe mode (--disable-gpu)")
     try { log(`gpu status: ${JSON.stringify(app.getGPUFeatureStatus())}`) } catch {}
     await createWindow()
+    await createTray()
   }).catch((e) => log(`fatal: ${e?.stack || e}`))
 }
 
@@ -474,7 +544,11 @@ app.on("window-all-closed", () => {
   app.quit()
 })
 
-app.on("before-quit", () => { quitting = true; killServer() })
+app.on("before-quit", () => {
+  quitting = true
+  killServer()
+  if (tray) { try { tray.destroy() } catch {} tray = null }
+})
 
 process.on("exit", killServer)
 process.on("uncaughtException", (e) => log(`uncaughtException: ${e?.stack || e}`))
