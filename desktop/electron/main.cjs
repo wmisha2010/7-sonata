@@ -440,6 +440,29 @@ async function createTray() {
 }
 
 // ---- window ----
+// The window is created hidden and shown only when TWO things have happened:
+// the page painted its first frame (`ready-to-show`) AND the renderer says the
+// saved library is restored (`sonata:renderer-ready`). Showing at the first
+// paint alone flashed the "Загрузка библиотеки…" splash before the real player.
+let rendererReady = false
+let firstPaint = false
+
+function maybeShowWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!firstPaint || !rendererReady || hiddenToTray) return
+  if (mainWindow.isVisible()) return
+  log("window shown: UI and library ready")
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+ipcMain.on("sonata:renderer-ready", () => {
+  if (rendererReady) return
+  rendererReady = true
+  log("renderer ready: library restored")
+  maybeShowWindow()
+})
+
 async function createWindow() {
   let url
   if (DEV_SERVER_URL) {
@@ -514,11 +537,26 @@ async function createWindow() {
   })
 
   mainWindow.once("ready-to-show", () => {
+    firstPaint = true
     if (miniMode) mainWindow.setAlwaysOnTop(true, "floating")
     const b = mainWindow.getBounds()
-    log(`window ready: ${miniMode ? "shade" : "full"} ${b.width}x${b.height}`)
-    mainWindow.show()
+    log(`window ready (first paint): ${miniMode ? "shade" : "full"} ${b.width}x${b.height}`)
+    maybeShowWindow()
   })
+
+  // The renderer cannot see that the window went to the tray or was minimized:
+  // occlusion tracking is off (so video/PiP survive), which keeps the page
+  // "visible" for Chromium. Tell it explicitly, and the decorative spectra stop
+  // their animation loops while nobody can see them.
+  const notifyVisibility = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      mainWindow.webContents.send("sonata:visibility", mainWindow.isVisible() && !mainWindow.isMinimized())
+    } catch {
+      /* webContents gone */
+    }
+  }
+  for (const ev of ["show", "hide", "minimize", "restore"]) mainWindow.on(ev, notifyVisibility)
 
   // Diagnostics: anything that could leave the window dark gets logged.
   mainWindow.webContents.on("did-finish-load", () => log("page did-finish-load"))
@@ -548,13 +586,14 @@ async function createWindow() {
   log(`loading ${url}`)
   try { await mainWindow.loadURL(url) } catch (e) { log(`loadURL failed: ${e?.message || e}`) }
 
-  // Safety net: never leave the user with an invisible window.
+  // Safety net: never leave the user with an invisible window (a renderer that
+  // never reports ready must not keep the app hidden forever).
   setTimeout(() => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible() && !hiddenToTray) {
-      log("window still hidden 10 s after load — showing anyway")
+      log(`window still hidden 6 s after load (rendererReady=${rendererReady}) — showing anyway`)
       mainWindow.show()
     }
-  }, 10000)
+  }, 6000)
 
   // Black-window auto-heal: page reports loaded, but the visible frame is
   // still pure black a few seconds later -> restart once in software mode.

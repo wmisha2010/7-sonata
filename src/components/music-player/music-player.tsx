@@ -152,7 +152,15 @@ interface SonataDesktopApi {
   windowAction?: (action: "minimize" | "maximize" | "tray" | "close") => Promise<boolean> | void
   startDrag?: (offsetX: number, offsetY: number) => Promise<boolean> | void
   endDrag?: () => Promise<boolean> | void
+  appReady?: () => void
+  onVisibility?: (cb: (visible: boolean) => void) => () => void
 }
+
+// The desktop shell hides the window to the tray and minimizes it without the
+// page ever becoming "hidden" (occlusion tracking is deliberately disabled so
+// video and PiP keep running). Decorative animation loops read this flag and
+// park themselves while nobody can see the player.
+const shellVisibility = { visible: true }
 
 function desktopApi(): SonataDesktopApi | undefined {
   if (typeof window === "undefined") return undefined
@@ -496,6 +504,26 @@ export function MusicPlayer() {
       cancelled = true
     }
   }, [])
+
+  // The desktop window is created hidden and only appears once the saved
+  // library is restored and the window mode is known. Report that first full
+  // frame, so the user never sees the "Загрузка библиотеки…" splash.
+  useEffect(() => {
+    if (!tracksReady || !uiReady) return
+    const api = desktopApi()
+    if (!api?.appReady) return
+    const raf = requestAnimationFrame(() => api.appReady?.())
+    return () => cancelAnimationFrame(raf)
+  }, [tracksReady, uiReady])
+
+  // Track whether the shell actually shows the window (tray / minimized).
+  useEffect(() => {
+    const off = desktopApi()?.onVisibility?.((visible) => {
+      shellVisibility.visible = visible
+    })
+    return () => off?.()
+  }, [])
+
   useEffect(() => {
     // Skip the mount pass — it would write the defaults before the loader
     // above has applied the stored values.
@@ -2190,16 +2218,43 @@ export function MusicPlayer() {
   const peakTimeRef = useRef<Float32Array>(new Float32Array(BAR_COUNT))
 
   useEffect(() => {
+    // Cosmetic loop: full speed only while audio is playing. Paused (or with the
+    // window hidden in the tray) it drops to a slow tick — a 60 fps canvas
+    // nobody watches is pure CPU burn, and the window is not throttled by
+    // Chromium (backgroundThrottling: false keeps playback alive).
+    let idleTimer = 0
+    // In the tray / minimized nothing is on screen: stay parked and only poll
+    // (no drawing at all) until the shell says the window is back.
+    const resume = () => {
+      if (!shellVisibility.visible) {
+        idleTimer = window.setTimeout(resume, 250)
+        return
+      }
+      rafRef.current = requestAnimationFrame(draw)
+    }
+    const schedule = () => {
+      if (!shellVisibility.visible) {
+        idleTimer = window.setTimeout(resume, 250)
+        return
+      }
+      if (!isPlayingRef.current) {
+        idleTimer = window.setTimeout(() => {
+          rafRef.current = requestAnimationFrame(draw)
+        }, 80)
+        return
+      }
+      rafRef.current = requestAnimationFrame(draw)
+    }
     const draw = () => {
       const canvas = canvasRef.current
       const analyser = analyserRef.current
       if (!canvas) {
-        rafRef.current = requestAnimationFrame(draw)
+        schedule()
         return
       }
       const ctx = canvas.getContext("2d")
       if (!ctx) {
-        rafRef.current = requestAnimationFrame(draw)
+        schedule()
         return
       }
       const dpr = window.devicePixelRatio || 1
@@ -2350,11 +2405,12 @@ export function MusicPlayer() {
       }
       ctx.restore()
 
-      rafRef.current = requestAnimationFrame(draw)
+      schedule()
     }
-    rafRef.current = requestAnimationFrame(draw)
+    schedule()
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      if (idleTimer) window.clearTimeout(idleTimer)
     }
   }, [])
 
@@ -3591,6 +3647,30 @@ function MiniSpectrum({
     const levels = new Float32Array(BARS)
     let buf: Uint8Array<ArrayBuffer> | null = null
     let raf = 0
+    let idleTimer = 0
+    // Same policy as the big spectrum: full speed while playing, slow tick when
+    // paused, fully parked (poll only) while the window is hidden in the tray
+    // or minimized.
+    const resume = () => {
+      if (!shellVisibility.visible) {
+        idleTimer = window.setTimeout(resume, 250)
+        return
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    const schedule = () => {
+      if (!shellVisibility.visible) {
+        idleTimer = window.setTimeout(resume, 250)
+        return
+      }
+      if (!playingRef.current) {
+        idleTimer = window.setTimeout(() => {
+          raf = requestAnimationFrame(draw)
+        }, 80)
+        return
+      }
+      raf = requestAnimationFrame(draw)
+    }
     const draw = () => {
       const dpr = window.devicePixelRatio || 1
       const w = canvas.clientWidth
@@ -3638,10 +3718,13 @@ function MiniSpectrum({
         ctx.fillStyle = grad
         ctx.fillRect(i * (barW + gap), h - barH, barW, barH)
       }
-      raf = requestAnimationFrame(draw)
+      schedule()
     }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
+    schedule()
+    return () => {
+      cancelAnimationFrame(raf)
+      if (idleTimer) window.clearTimeout(idleTimer)
+    }
   }, [analyserRef, from, to])
 
   return <canvas ref={canvasRef} className="h-6 w-full" aria-hidden />
