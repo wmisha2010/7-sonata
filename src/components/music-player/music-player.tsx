@@ -508,12 +508,37 @@ export function MusicPlayer() {
   // The desktop window is created hidden and only appears once the saved
   // library is restored and the window mode is known. Report that first full
   // frame, so the user never sees the "Загрузка библиотеки…" splash.
+  //
+  // The splash unmounts in this commit, but the player layer is heavy: without
+  // GPU acceleration its first raster takes a few hundred ms, and a window shown
+  // any earlier presents the previous (splash) frame. So report only once frame
+  // pacing is back to normal — two short consecutive frames — with a hard cap so
+  // a permanently slow frame can never keep the window hidden.
   useEffect(() => {
     if (!tracksReady || !uiReady) return
     const api = desktopApi()
     if (!api?.appReady) return
-    const raf = requestAnimationFrame(() => api.appReady?.())
-    return () => cancelAnimationFrame(raf)
+    let cancelled = false
+    let raf = 0
+    let last = 0
+    let quick = 0
+    const started = performance.now()
+    const tick = (now: number) => {
+      if (cancelled) return
+      if (last && now - last < 45) quick += 1
+      else quick = 0
+      last = now
+      if (quick >= 2 || now - started > 1200) {
+        api.appReady?.()
+        return
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+    }
   }, [tracksReady, uiReady])
 
   // Track whether the shell actually shows the window (tray / minimized).
