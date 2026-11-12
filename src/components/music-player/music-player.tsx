@@ -626,10 +626,33 @@ export function MusicPlayer() {
         void api.startDrag?.(startX, startY)
       }
     }
+    let ended = false
+    const finish = () => {
+      if (ended) return
+      ended = true
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+      window.removeEventListener("mouseleave", onLeave)
+      window.removeEventListener("blur", onLeave)
+      if (dragging) {
+        dragging = false
+        void api.endDrag?.()
+      }
+    }
+    const onLeave = () => {
+      // Failsafe: a missed mouseup (cursor left the window / window blurred)
+      // must not leave the window stuck to the cursor.
+      finish()
+    }
     const onUp = () => {
       window.removeEventListener("mousemove", onMove)
       window.removeEventListener("mouseup", onUp)
+      window.removeEventListener("mouseleave", onLeave)
+      window.removeEventListener("blur", onLeave)
+      if (ended) return
+      ended = true
       if (dragging) {
+        dragging = false
         void api.endDrag?.()
       } else {
         const now = Date.now()
@@ -644,6 +667,8 @@ export function MusicPlayer() {
     }
     window.addEventListener("mousemove", onMove)
     window.addEventListener("mouseup", onUp)
+    window.addEventListener("mouseleave", onLeave)
+    window.addEventListener("blur", onLeave)
   }, [windowAction])
   useEffect(() => {
     if (!compact) return

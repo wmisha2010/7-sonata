@@ -276,23 +276,42 @@ function applyMiniWindow(win, on) {
 
 let dragOffset = null
 let dragTimer = null
+let dragSafetyTimer = null
+function stopDrag() {
+  dragOffset = null
+  if (dragTimer) { clearInterval(dragTimer); dragTimer = null }
+  if (dragSafetyTimer) { clearTimeout(dragSafetyTimer); dragSafetyTimer = null }
+}
 ipcMain.handle("sonata:drag-start", (_event, ox, oy) => {
   if (!mainWindow || mainWindow.isDestroyed()) return false
-  dragOffset = { x: Number(ox) || 0, y: Number(oy) || 0 }
+  // A maximized window is first restored to its normal size (standard Windows
+  // behaviour: grabbing the title bar of a maximized window restores it and
+  // keeps following the cursor). The click offset is then recomputed against the
+  // restored window so the cursor stays put.
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize()
+  }
+  const pt = screen.getCursorScreenPoint()
+  const b = mainWindow.getBounds()
+  dragOffset = mainWindow.isMaximized()
+    ? { x: Number(ox) || 0, y: Number(oy) || 0 }
+    : { x: pt.x - b.x, y: pt.y - b.y }
   if (dragTimer) clearInterval(dragTimer)
   dragTimer = setInterval(() => {
     if (!mainWindow || mainWindow.isDestroyed() || !dragOffset) {
-      if (dragTimer) { clearInterval(dragTimer); dragTimer = null }
+      stopDrag()
       return
     }
-    const pt = screen.getCursorScreenPoint()
-    mainWindow.setPosition(Math.round(pt.x - dragOffset.x), Math.round(pt.y - dragOffset.y))
+    const p = screen.getCursorScreenPoint()
+    mainWindow.setPosition(Math.round(p.x - dragOffset.x), Math.round(p.y - dragOffset.y))
   }, 16)
+  // Failsafe: a missed mouseup must never leave the window stuck to the cursor.
+  if (dragSafetyTimer) clearTimeout(dragSafetyTimer)
+  dragSafetyTimer = setTimeout(stopDrag, 30000)
   return true
 })
 ipcMain.handle("sonata:drag-end", () => {
-  dragOffset = null
-  if (dragTimer) { clearInterval(dragTimer); dragTimer = null }
+  stopDrag()
   return true
 })
 
