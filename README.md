@@ -18,7 +18,6 @@
 |------|-----------|
 | Веб | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, shadcn/ui |
 | Аудио/видео | hls.js 1.7, Web Audio API, Media Session API |
-| БД | Prisma + SQLite (настраивается через `.env`) |
 | Десктоп | Electron + Vite (`desktop/`) |
 | Мобильные | Capacitor 8 + Android (`mobile/`) |
 
@@ -31,13 +30,11 @@
 │   │   ├── video-search/   #   поиск видео (Rutube)
 │   │   ├── video-stream/   #   HLS-прокси Rutube (манифесты + сегменты, Range)
 │   │   ├── audio-proxy/    #   same-origin прокси аудио (для Web Audio)
-│   │   ├── image-proxy/    #   прокси обложек
-│   │   └── download/       #   скачивание трека
+│   │   └── image-proxy/    #   прокси обложек
 │   ├── components/music-player/  # главный компонент плеера
 │   └── lib/                # mp3mn.ts, rutube.ts, metadata, storage, color-extract...
 ├── desktop/                # Electron-обёртка (Vite, автономная сборка)
 ├── mobile/                 # Capacitor 8 + Android-проект
-├── prisma/                 # схема БД
 └── public/                 # обложки, логотип
 ```
 
@@ -45,8 +42,6 @@
 
 ```bash
 bun install            # или npm install / pnpm install
-cp .env.example .env   # DATABASE_URL="file:./db/custom.db"
-bunx prisma db push    # создать/обновить схему БД
 bun run dev            # dev-сервер на http://localhost:3000
 ```
 

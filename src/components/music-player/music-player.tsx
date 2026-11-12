@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Play,
   Pause,
@@ -29,6 +29,10 @@ import {
   X,
   PanelLeft,
   PanelLeftOpen,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Square,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { APP_VERSION } from "@/lib/version"
@@ -39,7 +43,7 @@ import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichmen
 import { extractCoverColors } from "@/lib/color-extract"
 import { searchMp3mn, mp3mnToTrack } from "@/lib/mp3mn"
 import { searchRutube, rutubeToTrack, isRutubeUrl, rutubeId } from "@/lib/rutube"
-import Hls from "hls.js"
+import type Hls from "hls.js"
 import {
   loadLibrary,
   saveLibrary,
@@ -78,6 +82,17 @@ const RT_HLS_CONF = {
   nudgeMaxRetry: 10,
 }
 
+// hls.js is only needed for Rutube video tracks, so the library is imported
+// lazily: a static import shipped it (~150 KB gzip) to every visitor, even
+// those who only ever play audio. The module promise is shared by the video
+// effect and the background-audio fallback, so the chunk is fetched once.
+type HlsConstructor = typeof import("hls.js").default
+let hlsModulePromise: Promise<HlsConstructor> | null = null
+function loadHls(): Promise<HlsConstructor> {
+  if (!hlsModulePromise) hlsModulePromise = import("hls.js").then((m) => m.default)
+  return hlsModulePromise
+}
+
 // Media Session API wrapper
 interface MediaSessionPluginShape {
   setMetadata(opts: { title: string; artist: string; album: string; artwork: any[] }): Promise<void>
@@ -101,6 +116,38 @@ const mediaSessionApi = {
 
 type RepeatMode = "off" | "all" | "one"
 type Theme = "dark" | "light"
+type SortMode = "default" | "title" | "artist" | "duration" | "date"
+
+// UI settings that survive a reload / app relaunch.
+const SETTINGS_KEY = "sonata-settings-v1"
+interface PersistedSettings {
+  theme: Theme
+  volume: number
+  muted: boolean
+  shuffle: boolean
+  repeatMode: RepeatMode
+  sortMode: SortMode
+  sortAsc: boolean
+  playlistCollapsed: boolean
+  /** v1.8.7: the shade state survives a restart. */
+  compact: boolean
+}
+
+// The Electron shell exposes a tiny bridge (see desktop/electron/preload.cjs).
+// Deliberately NOT named `isDesktop`: src/lib/mp3mn.ts treats that flag as "an
+// IPC bridge for search/downloads exists" and would call missing methods.
+interface SonataDesktopApi {
+  framelessShell?: boolean
+  setMiniMode?: (on: boolean) => Promise<boolean> | void
+  getMiniMode?: () => Promise<boolean> | void
+  setMiniSize?: (height: number) => Promise<boolean> | void
+  windowAction?: (action: "minimize" | "maximize" | "close") => Promise<boolean> | void
+}
+
+function desktopApi(): SonataDesktopApi | undefined {
+  if (typeof window === "undefined") return undefined
+  return (window as unknown as { sonata?: SonataDesktopApi }).sonata
+}
 
 export function MusicPlayer() {
   // Start empty — users add their own music.
@@ -156,6 +203,21 @@ export function MusicPlayer() {
   // Collapse the playlist panel (especially useful on mobile / narrow screens
   // so the player gets the full width).
   const [playlistCollapsed, setPlaylistCollapsed] = useState(false)
+  // Winamp-style "windowshade": the whole UI collapses into one bar. The
+  // page itself stays mounted (so playback never stops); Electron also
+  // shrinks the OS window through the preload bridge below.
+  const [compact, setCompact] = useState(false)
+  // Playlist drawer inside the compact bar.
+  const [compactPlaylist, setCompactPlaylist] = useState(false)
+  // The Electron window runs frameless (no OS title bar), so the app draws its
+  // own slim one. Detected after mount to keep SSR markup identical.
+  const [framelessShell, setFramelessShell] = useState(false)
+  // Gates the first paint until the saved UI settings are applied — otherwise
+  // a restart in compact mode flashes the full player inside the small window.
+  const [uiReady, setUiReady] = useState(false)
+  useEffect(() => {
+    if (desktopApi()?.framelessShell) setFramelessShell(true)
+  }, [])
   // Playlist sort mode — user can sort by title, artist, duration, date added.
   const [sortMode, setSortMode] = useState<"default" | "title" | "artist" | "duration" | "date">("default")
   const [sortAsc, setSortAsc] = useState(true)
@@ -357,9 +419,195 @@ export function MusicPlayer() {
     }
   }, [theme])
 
+  // ---- Persisted UI settings ----
+  // Theme, volume, repeat/shuffle and the playlist view options used to reset
+  // on every reload. They are read in an effect (not in the state initializer)
+  // so the server-rendered markup and the first client render still match.
+  const settingsFirstSaveRef = useRef(true)
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SETTINGS_KEY)
+      if (!raw) return
+      const s = JSON.parse(raw) as Partial<PersistedSettings>
+      if (s.theme === "light" || s.theme === "dark") setTheme(s.theme)
+      if (typeof s.volume === "number" && Number.isFinite(s.volume))
+        setVolume(Math.min(1, Math.max(0, s.volume)))
+      if (typeof s.muted === "boolean") setMuted(s.muted)
+      if (typeof s.shuffle === "boolean") setShuffle(s.shuffle)
+      if (s.repeatMode === "off" || s.repeatMode === "all" || s.repeatMode === "one")
+        setRepeatMode(s.repeatMode)
+      if (
+        s.sortMode === "default" ||
+        s.sortMode === "title" ||
+        s.sortMode === "artist" ||
+        s.sortMode === "duration" ||
+        s.sortMode === "date"
+      )
+        setSortMode(s.sortMode)
+      if (typeof s.sortAsc === "boolean") setSortAsc(s.sortAsc)
+      if (typeof s.playlistCollapsed === "boolean") setPlaylistCollapsed(s.playlistCollapsed)
+      // v1.8.7: relaunch in the same mode the app was closed in.
+      if (typeof s.compact === "boolean") setCompact(s.compact)
+    } catch {
+      /* unreadable/corrupt entry — keep the defaults */
+    }
+  }, [])
+
+  // Electron owns the window mode: the main process opened the window in the
+  // mode the app was closed in before this page even existed, so its answer
+  // wins over the renderer's cached copy. The first paint is held back until
+  // that is known (no flash of the full player inside a 452px window).
+  useEffect(() => {
+    let cancelled = false
+    const api = desktopApi()
+    const done = (mini?: boolean) => {
+      if (cancelled) return
+      if (mini) setCompact(true)
+      setUiReady(true)
+    }
+    if (api?.framelessShell && typeof api.getMiniMode === "function") {
+      Promise.resolve(api.getMiniMode())
+        .then((on) => done(on === true))
+        .catch(() => done())
+    } else {
+      done()
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    // Skip the mount pass — it would write the defaults before the loader
+    // above has applied the stored values.
+    if (settingsFirstSaveRef.current) {
+      settingsFirstSaveRef.current = false
+      return
+    }
+    try {
+      const s: PersistedSettings = {
+        theme,
+        volume,
+        muted,
+        shuffle,
+        repeatMode,
+        sortMode,
+        sortAsc,
+        playlistCollapsed,
+        compact,
+      }
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
+    } catch {
+      /* private mode / quota — settings simply won't persist */
+    }
+  }, [theme, volume, muted, shuffle, repeatMode, sortMode, sortAsc, playlistCollapsed, compact])
+
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === "dark" ? "light" : "dark"))
   }, [])
+
+  // ---- Compact mode: video goes to its own little window ----
+  // The shade is only 452px wide, so a video would be hidden behind the bar.
+  // The <video> (or the embed iframe) is popped into the OS
+  // picture-in-picture window instead — a real separate always-on-top
+  // window, while playback continues in the same element (no restart).
+  const pipTarget = useCallback(() => {
+    const el = isRtEmbed ? rtFrameRef.current : videoRef.current
+    return el as unknown as { requestPictureInPicture?: () => Promise<unknown> } | null
+  }, [isRtEmbed])
+  const enterCompactPip = useCallback(() => {
+    if (typeof document === "undefined" || document.pictureInPictureElement) return
+    const el = pipTarget()
+    if (!el || typeof el.requestPictureInPicture !== "function") return
+    try {
+      const p = el.requestPictureInPicture()
+      if (p && typeof p.catch === "function") p.catch(() => {})
+    } catch {
+      /* unsupported / no user activation — the audio keeps playing */
+    }
+  }, [pipTarget])
+  const exitCompactPip = useCallback(() => {
+    if (typeof document === "undefined" || !document.pictureInPictureElement) return
+    if (typeof document.exitPictureInPicture !== "function") return
+    try {
+      void document.exitPictureInPicture().catch(() => {})
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  // Enter/leave the compact bar. In Electron the window is resized by the main
+  // process (see desktop/electron/main.cjs); in a browser this is just an
+  // overlay over the same page, so playback continues either way.
+  const enterCompact = useCallback(() => {
+    setCompact(true)
+    setCompactPlaylist(false)
+    if (currentTrack?.isVideo) enterCompactPip()
+  }, [currentTrack?.isVideo, enterCompactPip])
+  const exitCompact = useCallback(() => {
+    setCompact(false)
+    setCompactPlaylist(false)
+    exitCompactPip()
+  }, [exitCompactPip])
+
+  // Keep the desktop window in sync with the shade — size, always-on-top and
+  // resizability. Also covers the restored state on launch, where the main
+  // process already opened the small window.
+  useEffect(() => {
+    if (!framelessShell || !uiReady) return
+    void desktopApi()?.setMiniMode?.(compact)
+  }, [framelessShell, uiReady, compact])
+
+  // A video started (or picked from the drawer) while the shade is open goes
+  // to its own little window.
+  useEffect(() => {
+    if (!compact || !currentTrack?.isVideo) return
+    const t = window.setTimeout(enterCompactPip, 400)
+    return () => window.clearTimeout(t)
+  }, [compact, currentTrack?.isVideo, currentTrack?.id, enterCompactPip])
+
+  // A finished video hands over to the next track — the floating window must
+  // close by itself instead of hanging around with a stale last frame.
+  const prevWasVideoRef = useRef(false)
+  useEffect(() => {
+    const wasVideo = prevWasVideoRef.current
+    prevWasVideoRef.current = !!currentTrack?.isVideo
+    if (wasVideo && !currentTrack?.isVideo) exitCompactPip()
+  }, [currentTrack?.isVideo, currentTrack?.id, exitCompactPip])
+
+  // Leaving the shade puts the video back into the page.
+  useEffect(() => {
+    if (compact) return
+    exitCompactPip()
+  }, [compact, exitCompactPip])
+  const windowAction = useCallback((action: "minimize" | "maximize" | "close") => {
+    void desktopApi()?.windowAction?.(action)
+  }, [])
+  useEffect(() => {
+    if (!compact) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") exitCompact()
+    }
+    window.addEventListener("keydown", onKey)
+    // The page underneath stays mounted and is far taller than the tiny
+    // compact window — without this the OS draws a page scrollbar right next
+    // to the bar.
+    const html = document.documentElement
+    const prevHtml = html.style.overflow
+    const prevBody = document.body.style.overflow
+    html.style.overflow = "hidden"
+    document.body.style.overflow = "hidden"
+    return () => {
+      window.removeEventListener("keydown", onKey)
+      html.style.overflow = prevHtml
+      document.body.style.overflow = prevBody
+    }
+  }, [compact, exitCompact])
+  // The compact window grows when the playlist drawer opens (Electron only;
+  // in a browser the bar is centred over the page instead).
+  useEffect(() => {
+    if (!compact) return
+    void desktopApi()?.setMiniSize?.(compactPlaylist ? 396 : 172)
+  }, [compact, compactPlaylist])
 
   // ---- Restore the user's saved library on mount ----
   useEffect(() => {
@@ -716,6 +964,8 @@ export function MusicPlayer() {
     const vid = rutubeId(currentTrack.url)
     if (!vid) return
     let cancelled = false
+    let hls: Hls | null = null
+    let detachNative: (() => void) | null = null
     setRtLevels([]) // v1.8.0: fresh quality list per video
     const src = `/api/video-stream?id=${encodeURIComponent(vid)}`
     rtMasterUrlRef.current = src // v1.7.4: reusable by the bg-audio fallback
@@ -737,57 +987,72 @@ export function MusicPlayer() {
       }
     }
 
-    if (Hls.isSupported()) {
-      const hls = new Hls(RT_HLS_CONF)
-      hlsRef.current = hls
-      hls.loadSource(src)
-      hls.attachMedia(video)
-      hls.on(Hls.Events.MANIFEST_PARSED, (_evt, data) => {
-        // v1.8.0: expose the available heights for the quality selector.
-        try {
-          setRtLevels(
-            data.levels
-              .map((L, i) => ({ index: i, height: L.height ?? 0 }))
-              .filter((l) => l.height > 0)
-          )
-        } catch {
-          setRtLevels([])
-        }
-        startPlay()
-      })
-      hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (cancelled || !data.fatal) return
-        // Manifest/segment/network failure — the official embed usually
-        // still plays such videos (it handles DRM/ACL itself).
+    // hls.js arrives as a separate chunk here (see loadHls). Everything after
+    // the await is guarded by `cancelled`, because the track may have changed
+    // while the chunk was still downloading.
+    void (async () => {
+      const HlsLib = await loadHls().catch(() => null)
+      if (cancelled) return
+      if (!HlsLib) {
         setRtUseEmbed(true)
-      })
-      return () => {
-        cancelled = true
-        hls.destroy()
-        if (hlsRef.current === hls) hlsRef.current = null
-        rtMasterUrlRef.current = "" // v1.7.4: never reuse a stale master across tracks
+        return
       }
-    }
 
-    // Safari / iOS: native HLS support — give the element the proxied
-    // manifest directly.
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = src
-      const onMeta = () => startPlay()
-      const onErr = () => setRtUseEmbed(true)
-      video.addEventListener("loadedmetadata", onMeta)
-      video.addEventListener("error", onErr)
-      return () => {
-        cancelled = true
-        video.removeEventListener("loadedmetadata", onMeta)
-        video.removeEventListener("error", onErr)
-        video.removeAttribute("src")
-        rtMasterUrlRef.current = "" // v1.7.4: never reuse a stale master across tracks
+      if (HlsLib.isSupported()) {
+        const instance = new HlsLib(RT_HLS_CONF)
+        hls = instance
+        hlsRef.current = instance
+        instance.loadSource(src)
+        instance.attachMedia(video)
+        instance.on(HlsLib.Events.MANIFEST_PARSED, (_evt, data) => {
+          // v1.8.0: expose the available heights for the quality selector.
+          try {
+            setRtLevels(
+              data.levels
+                .map((L, i) => ({ index: i, height: L.height ?? 0 }))
+                .filter((l) => l.height > 0)
+            )
+          } catch {
+            setRtLevels([])
+          }
+          startPlay()
+        })
+        instance.on(HlsLib.Events.ERROR, (_evt, data) => {
+          if (cancelled || !data.fatal) return
+          // Manifest/segment/network failure — the official embed usually
+          // still plays such videos (it handles DRM/ACL itself).
+          setRtUseEmbed(true)
+        })
+        return
       }
-    }
 
-    // No MSE and no native HLS → straight to the official embed.
-    setRtUseEmbed(true)
+      // Safari / iOS: native HLS support — give the element the proxied
+      // manifest directly.
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = src
+        const onMeta = () => startPlay()
+        const onErr = () => setRtUseEmbed(true)
+        video.addEventListener("loadedmetadata", onMeta)
+        video.addEventListener("error", onErr)
+        detachNative = () => {
+          video.removeEventListener("loadedmetadata", onMeta)
+          video.removeEventListener("error", onErr)
+          video.removeAttribute("src")
+        }
+        return
+      }
+
+      // No MSE and no native HLS → straight to the official embed.
+      setRtUseEmbed(true)
+    })()
+
+    return () => {
+      cancelled = true
+      if (hls) hls.destroy()
+      if (hlsRef.current === hls) hlsRef.current = null
+      if (detachNative) detachNative()
+      rtMasterUrlRef.current = "" // v1.7.4: never reuse a stale master across tracks
+    }
   }, [isRtHls, currentTrack?.id, currentTrack?.url, ensureAudioGraph])
 
   const playIndex = useCallback(
@@ -813,6 +1078,14 @@ export function MusicPlayer() {
       selectTrack(index)
     },
     [selectTrack, currentIndex, currentTrack?.isVideo, previewTrack]
+  )
+
+  // Stable for the whole playback session (it changes only when the playlist
+  // or the current track does), so memoized rows are not re-rendered by the
+  // four progress updates per second.
+  const playRow = useCallback(
+    (id: string) => playIndex(tracks.findIndex((t) => t.id === id)),
+    [playIndex, tracks]
   )
 
   const playNext = useCallback(() => {
@@ -1286,19 +1559,25 @@ export function MusicPlayer() {
       // The HLS effect sets rtMasterUrlRef synchronously per track.
       const master = rtMasterUrlRef.current
       if (!master) { stopBgAudio(); return }
-      if (Hls.isSupported()) {
-        const h = new Hls(RT_HLS_CONF)
-        bgHlsRef.current = h
-        h.loadSource(master)
-        h.attachMedia(el)
-        h.on(Hls.Events.MANIFEST_PARSED, () => { if (bgFallbackRef.current) startAt() })
-        h.on(Hls.Events.ERROR, (_evt, data) => { if (data.fatal && bgFallbackRef.current) stopBgAudio() })
-      } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
-        el.src = master
-        startAt()
-      } else {
-        stopBgAudio()
-      }
+      // Lazy hls.js — normally already loaded (this path implies a Rutube
+      // video was playing), so the promise resolves from cache instantly.
+      void (async () => {
+        const HlsLib = await loadHls().catch(() => null)
+        if (!bgFallbackRef.current) return
+        if (HlsLib?.isSupported()) {
+          const h = new HlsLib(RT_HLS_CONF)
+          bgHlsRef.current = h
+          h.loadSource(master)
+          h.attachMedia(el)
+          h.on(HlsLib.Events.MANIFEST_PARSED, () => { if (bgFallbackRef.current) startAt() })
+          h.on(HlsLib.Events.ERROR, (_evt, data) => { if (data.fatal && bgFallbackRef.current) stopBgAudio() })
+        } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
+          el.src = master
+          startAt()
+        } else {
+          stopBgAudio()
+        }
+      })()
     } else {
       // Local (uploaded) video: an <audio> element decodes the container's
       // audio track from the very same blob/file URL.
@@ -2135,6 +2414,45 @@ export function MusicPlayer() {
         }
       }}
     >
+      {/* Frameless Electron window: the OS title bar is gone, so the app draws
+          its own slim one (drag area + window buttons). Not rendered in a
+          normal browser. */}
+      {framelessShell && !compact && (
+        <div className="app-drag relative z-20 flex h-8 shrink-0 items-center justify-between border-b border-border/50 bg-background/70 pl-3 pr-1 backdrop-blur-xl">
+          <div className="flex items-center gap-2">
+            <Disc3 className="h-3 w-3 text-violet-500 dark:text-emerald-400" />
+            <span className="text-[11px] font-semibold text-foreground/90">7-Sonata</span>
+            <span className="text-[10px] text-foreground/40">v{APP_VERSION}</span>
+          </div>
+          <div className="app-no-drag flex items-center">
+            <button
+              onClick={() => windowAction("minimize")}
+              className="grid h-7 w-9 place-items-center text-foreground/70 transition hover:bg-secondary hover:text-foreground"
+              aria-label="Свернуть окно"
+              title="Свернуть"
+            >
+              <Minus className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => windowAction("maximize")}
+              className="grid h-7 w-9 place-items-center text-foreground/70 transition hover:bg-secondary hover:text-foreground"
+              aria-label="Развернуть на весь экран"
+              title="Развернуть"
+            >
+              <Square className="h-3 w-3" />
+            </button>
+            <button
+              onClick={() => windowAction("close")}
+              className="grid h-7 w-9 place-items-center text-foreground/70 transition hover:bg-rose-500 hover:text-white"
+              aria-label="Закрыть"
+              title="Закрыть"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Hidden audio element for audio tracks.
           Video tracks use the visible <video> rendered in the now-playing section. */}
       <audio
@@ -2183,7 +2501,7 @@ export function MusicPlayer() {
       )}
 
       {/* Loading splash while restoring the saved library */}
-      {!tracksReady && (
+      {(!tracksReady || !uiReady) && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-background">
           <Disc3 className="h-12 w-12 animate-spin-slow text-violet-500 dark:text-emerald-400" />
           <p className="text-xs text-muted-foreground">Загрузка библиотеки…</p>
@@ -2629,7 +2947,7 @@ export function MusicPlayer() {
             space after the player/video section (no dead gap on the right
             on maximized windows). */}
         {!playlistCollapsed && (
-        <aside className="flex w-full min-w-0 flex-col overflow-hidden lg:min-w-[200px]" style={{ flex: "1 1 0%" }}>
+        <aside className="flex w-full min-w-0 flex-col overflow-hidden lg:min-w-[200px] lg:max-h-[calc(100vh_-_260px)]" style={{ flex: "1 1 0%" }}>
           <div className="flex h-full flex-col overflow-hidden rounded-3xl border border-border/50 bg-card/60 backdrop-blur-2xl"
                style={{
                  backgroundColor: currentTrack
@@ -2783,7 +3101,7 @@ export function MusicPlayer() {
             {/* v1.8.3: on desktop the list fills the panel's real height
                 (flex-1 + min-h-0) instead of a magic 100vh offset; mobile
                 keeps the viewport-based cap. */}
-            <div className="custom-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden max-h-[calc(100vh_-_360px)] lg:max-h-none">
+            <div className="custom-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden max-h-[calc(100vh_-_360px)] lg:max-h-full">
               {searchMode !== "library" ? (
                 <ul className="divide-y divide-border">
                   {searchResults.map((track) => {
@@ -2888,87 +3206,16 @@ export function MusicPlayer() {
               ) : (
                 <ul className="divide-y divide-border">
                 {sortedTracks.map((track) => {
-                  const realIdx = tracks.findIndex((t) => t.id === track.id)
-                  const active = realIdx === currentIndex
+                  const active = tracks[currentIndex]?.id === track.id
                   return (
-                    <li key={track.id} className="min-w-0 overflow-hidden">
-                      <button
-                        onClick={() => playIndex(realIdx)}
-                        className={cn(
-                          "group flex w-full min-w-0 items-center gap-3 px-3 py-2.5 text-left transition-colors",
-                          active ? "bg-violet-500/10 dark:bg-emerald-500/10" : "hover:bg-secondary"
-                        )}
-                      >
-                        <div
-                          className="relative grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-lg"
-                          style={{
-                            backgroundImage: `linear-gradient(135deg, ${track.cover.from}, ${track.cover.to})`,
-                          }}
-                        >
-                          {track.coverImage ? (
-                            <img
-                              src={track.coverImage}
-                              alt=""
-                              className="absolute inset-0 h-full w-full object-cover"
-                              draggable={false}
-                            />
-                          ) : null}
-                          {active && isPlaying ? (
-                            <EqualizerIcon />
-                          ) : active ? (
-                            <Pause className="relative h-4 w-4 text-white" />
-                          ) : (
-                            !track.coverImage && (
-                              track.isVideo ? (
-                                <Film className="relative h-4 w-4 text-white/90" />
-                              ) : (
-                                <Music2 className="relative h-4 w-4 text-white/80" />
-                              )
-                            )
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p
-                            className={cn(
-                              "truncate text-sm font-medium",
-                              active ? "text-violet-500 dark:text-emerald-500" : "text-foreground"
-                            )}
-                            title={track.title}
-                          >
-                            {track.title}
-                          </p>
-                          <p
-                            className="truncate text-xs text-muted-foreground"
-                            title={track.artist}
-                          >
-                            {track.artist}
-                          </p>
-                        </div>
-                        <span
-                          className="shrink-0 cursor-pointer rounded-md p-1 text-muted-foreground transition hover:bg-secondary hover:text-rose-400"
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            removeTrack(track.id)
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              removeTrack(track.id)
-                            }
-                          }}
-                          aria-label="Удалить трек"
-                          title="Удалить трек"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </span>
-                        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                          {formatTime(track.duration)}
-                        </span>
-                      </button>
-                    </li>
+                    <PlaylistRow
+                      key={track.id}
+                      track={track}
+                      active={active}
+                      playing={active && isPlaying}
+                      onPlay={playRow}
+                      onRemove={removeTrack}
+                    />
                   )
                 })}
                 {tracks.length === 0 && searchResults.length === 0 && (
@@ -3050,6 +3297,16 @@ export function MusicPlayer() {
             <Button
               variant="ghost"
               size="icon"
+              onClick={enterCompact}
+              className="h-7 w-7 text-foreground/80 hover:text-foreground"
+              aria-label="Окно-шторка"
+              title="Окно-шторка (как в Winamp)"
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={toggleTheme}
               className="h-7 w-7 text-foreground/80 hover:text-foreground"
               aria-label={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
@@ -3077,6 +3334,47 @@ export function MusicPlayer() {
           </div>
         </div>
       </footer>
+
+      {compact && (
+        <CompactPlayer
+          track={currentTrack ?? null}
+          playing={isPlaying}
+          progress={progress}
+          duration={duration || currentTrack?.duration || 0}
+          volume={volume}
+          muted={muted}
+          shuffle={shuffle}
+          repeatMode={repeatMode}
+          analyserRef={analyserRef}
+          // v1.8.7: the bar takes its colours from the track cover, exactly
+          // like the expanded player (cover-tinted card, glow, spectrum).
+          accentFrom={currentTrack ? currentTrack.cover.from : theme === "dark" ? "#34d399" : "#a78bfa"}
+          accentTo={currentTrack ? currentTrack.cover.to : theme === "dark" ? "#22d3ee" : "#e879f9"}
+          tracks={tracks}
+          currentTrackId={currentTrack?.id ?? null}
+          playlistOpen={compactPlaylist}
+          frameless={framelessShell}
+          onTogglePlaylist={() => setCompactPlaylist((v) => !v)}
+          onSelectTrack={playRow}
+          onTogglePlay={togglePlay}
+          onPrev={playPrev}
+          onNext={playNext}
+          onSeek={seek}
+          onVolumeChange={(v) => {
+            setVolume(v)
+            setMuted(v === 0)
+          }}
+          onToggleMute={() => setMuted((m) => !m)}
+          onToggleShuffle={() => setShuffle((s) => !s)}
+          onCycleRepeat={() => setRepeatMode((m) => (m === "off" ? "all" : m === "all" ? "one" : "off"))}
+          onExpand={exitCompact}
+          onClose={() => {
+            // Quit exactly as-is: the desktop shell remembers the shade and
+            // reopens the app in it next time.
+            windowAction("close")
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -3128,6 +3426,542 @@ function roundRect(
   ctx.arcTo(x, y, x + w, y, radius)
   ctx.closePath()
 }
+
+// ---- Windowshade (Winamp-style compact bar) ----
+// Mini spectrum driven by the same AnalyserNode as the big VFD display: real
+// samples for local media, a soft synthetic wave for CORS-silenced remote
+// streams (and while paused), so the bar never looks dead.
+function MiniSpectrum({
+  analyserRef,
+  playing,
+  from,
+  to,
+}: {
+  analyserRef: React.RefObject<AnalyserNode | null>
+  playing: boolean
+  from: string
+  to: string
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const playingRef = useRef(playing)
+  useEffect(() => {
+    playingRef.current = playing
+  }, [playing])
+
+  useEffect(() => {
+    const BARS = 18
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!canvas || !ctx) return
+    const levels = new Float32Array(BARS)
+    let buf: Uint8Array<ArrayBuffer> | null = null
+    let raf = 0
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr
+        canvas.height = h * dpr
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, w, h)
+
+      const analyser = analyserRef.current
+      let data: Uint8Array | null = null
+      if (analyser && playingRef.current) {
+        if (!buf || buf.length !== analyser.frequencyBinCount) buf = new Uint8Array(analyser.frequencyBinCount)
+        try {
+          analyser.getByteFrequencyData(buf)
+          let sum = 0
+          for (let i = 0; i < buf.length; i++) sum += buf[i]
+          // All-zero samples == CORS-silenced stream → keep the synthetic wave.
+          if (sum > 0) data = buf
+        } catch {
+          data = null
+        }
+      }
+
+      const t = performance.now() / 1000
+      const gap = 2
+      const barW = (w - gap * (BARS - 1)) / BARS
+      for (let i = 0; i < BARS; i++) {
+        let target: number
+        if (data) {
+          const idx = Math.min(data.length - 1, 1 + Math.floor((i / BARS) * data.length * 0.6))
+          target = Math.sqrt(data[idx] / 255)
+        } else if (playingRef.current) {
+          target = 0.28 + 0.22 * Math.sin(t * 6 + i * 0.7) + 0.12 * Math.sin(t * 11 + i * 1.3)
+        } else {
+          target = 0.05
+        }
+        levels[i] += (target - levels[i]) * 0.35
+        const barH = Math.max(2, Math.min(h, levels[i] * h))
+        const grad = ctx.createLinearGradient(0, h, 0, h - barH)
+        grad.addColorStop(0, from)
+        grad.addColorStop(1, to)
+        ctx.fillStyle = grad
+        ctx.fillRect(i * (barW + gap), h - barH, barW, barH)
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [analyserRef, from, to])
+
+  return <canvas ref={canvasRef} className="h-6 w-full" aria-hidden />
+}
+
+// Winamp-style windowshade: a small self-contained panel — drag area, VFD
+// time display, track line, spectrum, position, transport with volume and a
+// collapsible playlist drawer. Drawn over the still-mounted page, so playback
+// never restarts.
+function CompactPlayer({
+  track,
+  playing,
+  progress,
+  duration,
+  volume,
+  muted,
+  shuffle,
+  repeatMode,
+  analyserRef,
+  accentFrom,
+  accentTo,
+  tracks,
+  currentTrackId,
+  playlistOpen,
+  frameless,
+  onTogglePlaylist,
+  onSelectTrack,
+  onTogglePlay,
+  onPrev,
+  onNext,
+  onSeek,
+  onVolumeChange,
+  onToggleMute,
+  onToggleShuffle,
+  onCycleRepeat,
+  onExpand,
+  onClose,
+}: {
+  track: Track | null
+  playing: boolean
+  progress: number
+  duration: number
+  volume: number
+  muted: boolean
+  shuffle: boolean
+  repeatMode: RepeatMode
+  analyserRef: React.RefObject<AnalyserNode | null>
+  accentFrom: string
+  accentTo: string
+  tracks: Track[]
+  currentTrackId: string | null
+  playlistOpen: boolean
+  /** True inside the frameless Electron shell — then the panel fills the
+   *  whole compact window instead of floating in the middle of a page. */
+  frameless: boolean
+  onTogglePlaylist: () => void
+  onSelectTrack: (id: string) => void
+  onTogglePlay: () => void
+  onPrev: () => void
+  onNext: () => void
+  onSeek: (value: number) => void
+  onVolumeChange: (value: number) => void
+  onToggleMute: () => void
+  onToggleShuffle: () => void
+  onCycleRepeat: () => void
+  onExpand: () => void
+  onClose: () => void
+}) {
+  const pct = duration > 0 ? Math.min(100, Math.max(0, (progress / duration) * 100)) : 0
+  const repeatActive = repeatMode !== "off"
+  const repeatTitle =
+    repeatMode === "off" ? "Повтор выключен" : repeatMode === "all" ? "Повтор всего списка" : "Повтор одной"
+  const onSeekClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (duration <= 0) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const ratio = (e.clientX - r.left) / r.width
+    onSeek(Math.min(duration, Math.max(0, ratio * duration)))
+  }
+
+  return (
+    <div
+      className={cn(
+        "fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-2 backdrop-blur-md",
+        // In the frameless desktop window the bar IS the window: no page
+        // margin, no translucent gutter — otherwise strips of the page
+        // underneath show around the edges.
+        frameless && "bg-[#08080b] p-0 backdrop-blur-none"
+      )}
+    >
+      <div
+        className={cn(
+          "isolate relative flex w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0d0d11] text-foreground shadow-2xl",
+          frameless && "h-full max-w-none rounded-none border-0 shadow-none"
+        )}
+      >
+        {/* Same colour treatment as the full player: the cover, blurred,
+            washed with the track's gradient. */}
+        {track?.coverImage && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 opacity-50"
+            style={{
+              backgroundImage: `url(${track.coverImage})`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              filter: "blur(26px) saturate(1.6)",
+              transform: "scale(1.4)",
+            }}
+          />
+        )}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 -z-10"
+          style={{
+            background: `linear-gradient(180deg, ${accentTo}1f 0%, #0d0d11e6 45%, #0d0d11f7 100%)`,
+          }}
+        />
+        {/* Title bar — drag area; window buttons keep working because the
+            Electron window is frameless. */}
+        <div className="app-drag flex h-[26px] shrink-0 items-center justify-between border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent pl-2.5 pr-1">
+          <div className="flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentFrom }} />
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-foreground/70">
+              7-Sonata
+            </span>
+            <span className="text-[9px] text-foreground/30">v{APP_VERSION}</span>
+          </div>
+          <div className="app-no-drag flex items-center">
+            <button
+              type="button"
+              onClick={onExpand}
+              className="grid h-5 w-5 place-items-center rounded text-foreground/60 transition hover:bg-white/10 hover:text-foreground"
+              aria-label="Развернуть окно"
+              title="Развернуть (Esc)"
+            >
+              <Maximize2 className="h-3 w-3" />
+            </button>
+            {frameless && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="grid h-5 w-5 place-items-center rounded text-foreground/60 transition hover:bg-rose-500 hover:text-white"
+                aria-label="Закрыть"
+                title="Закрыть"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Display: cover art + track + spectrum */}
+        <div className="flex shrink-0 items-stretch gap-2 px-2.5 pb-1.5 pt-2">
+          {/* The artwork replaces the old clock block; the timing moved next
+              to the artist line so the cover is always visible. */}
+          <div
+            className="relative h-[62px] w-[62px] shrink-0 overflow-hidden rounded-md border border-white/10 shadow-lg"
+            style={{ backgroundImage: `linear-gradient(135deg, ${accentFrom}, ${accentTo})` }}
+          >
+            {track?.coverImage ? (
+              <img
+                src={track.coverImage}
+                alt=""
+                className="absolute inset-0 h-full w-full object-cover"
+                draggable={false}
+              />
+            ) : (
+              <Disc3
+                className={cn(
+                  "absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 text-white/85 drop-shadow",
+                  playing && "animate-spin-slow"
+                )}
+              />
+            )}
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col justify-between gap-1">
+            <div className="min-w-0">
+              <p className="truncate text-[12px] font-semibold leading-tight" title={track?.title ?? ""}>
+                {track?.title ?? "Ничего не играет"}
+              </p>
+              <div className="mt-0.5 flex items-baseline gap-1">
+                <p
+                  className="min-w-0 flex-1 truncate text-[10px] leading-tight text-foreground/50"
+                  title={track ? `${track.artist} · ${track.album}` : ""}
+                >
+                  {track ? `${track.artist}${track.album ? ` · ${track.album}` : ""}` : ""}
+                </p>
+                <span
+                  className="shrink-0 text-[11px] font-semibold leading-none tabular-nums"
+                  style={{ color: accentFrom, textShadow: `0 0 10px ${accentFrom}55` }}
+                >
+                  {formatTime(progress)}
+                </span>
+                <span className="shrink-0 text-[9px] leading-none tabular-nums text-foreground/35">
+                  / {formatTime(duration)}
+                </span>
+              </div>
+            </div>
+            <MiniSpectrum analyserRef={analyserRef} playing={playing} from={accentFrom} to={accentTo} />
+          </div>
+        </div>
+
+        {/* Position */}
+        <div className="shrink-0 px-2.5 pb-1.5">
+          <div
+            role="slider"
+            aria-label="Позиция трека"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(duration)}
+            aria-valuenow={Math.round(progress)}
+            tabIndex={0}
+            onClick={onSeekClick}
+            className="h-2 w-full cursor-pointer overflow-hidden rounded-full bg-white/10"
+          >
+            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: accentFrom }} />
+          </div>
+        </div>
+
+        {/* Transport + volume + view toggles */}
+        <div className="flex shrink-0 items-center gap-0.5 border-t border-white/10 bg-white/[0.02] px-1.5 py-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onPrev}
+            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+            aria-label="Предыдущий трек"
+            title="Предыдущий трек"
+          >
+            <SkipBack className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onTogglePlay}
+            className="h-9 w-9 rounded-full"
+            style={{ backgroundColor: `${accentFrom}26`, color: accentFrom }}
+            aria-label={playing ? "Пауза" : "Играть"}
+            title={playing ? "Пауза" : "Играть"}
+          >
+            {playing ? <Pause className="h-4 w-4" /> : <Play className="ml-0.5 h-4 w-4" />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onNext}
+            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+            aria-label="Следующий трек"
+            title="Следующий трек"
+          >
+            <SkipForward className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onToggleMute}
+            className="h-8 w-8 text-foreground/60 hover:text-foreground"
+            aria-label={muted ? "Включить звук" : "Выключить звук"}
+            title={muted ? "Включить звук" : "Выключить звук"}
+          >
+            {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+          </Button>
+          <Slider
+            value={[muted ? 0 : Math.round(volume * 100)]}
+            max={100}
+            step={1}
+            onValueChange={(v) => onVolumeChange(v[0] / 100)}
+            className="w-[64px]"
+            aria-label="Громкость"
+          />
+          <div className="ml-auto flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onToggleShuffle}
+              className="grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5"
+              style={{ color: shuffle ? accentFrom : undefined }}
+              aria-pressed={shuffle}
+              aria-label="Перемешивание"
+              title="Перемешивание"
+            >
+              <Shuffle className={cn("h-3.5 w-3.5", !shuffle && "text-foreground/40")} />
+            </button>
+            <button
+              type="button"
+              onClick={onCycleRepeat}
+              className="grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5"
+              style={{ color: repeatActive ? accentFrom : undefined }}
+              aria-label={repeatTitle}
+              title={repeatTitle}
+            >
+              {repeatMode === "one" ? (
+                <Repeat1 className={cn("h-3.5 w-3.5", !repeatActive && "text-foreground/40")} />
+              ) : (
+                <Repeat className={cn("h-3.5 w-3.5", !repeatActive && "text-foreground/40")} />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onTogglePlaylist}
+              className={cn(
+                "grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5",
+                playlistOpen ? "text-foreground" : "text-foreground/45 hover:text-foreground/80"
+              )}
+              style={{ color: playlistOpen ? accentFrom : undefined }}
+              aria-pressed={playlistOpen}
+              aria-label="Плейлист"
+              title="Плейлист"
+            >
+              <ListMusic className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Playlist drawer */}
+        {playlistOpen && (
+          <div
+            className={cn(
+              "custom-scroll min-h-0 overflow-y-auto border-t border-white/10",
+              frameless ? "flex-1" : "max-h-[240px]"
+            )}
+          >
+            {tracks.length === 0 ? (
+              <p className="px-3 py-6 text-center text-[11px] text-foreground/40">Плейлист пуст</p>
+            ) : (
+              tracks.map((tr, i) => {
+                const active = tr.id === currentTrackId
+                return (
+                  <button
+                    key={tr.id}
+                    type="button"
+                    onClick={() => onSelectTrack(tr.id)}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/5",
+                      active && "bg-white/[0.07]"
+                    )}
+                  >
+                    <span className="w-4 shrink-0 text-right text-[9px] tabular-nums text-foreground/30">
+                      {i + 1}
+                    </span>
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 rounded-full"
+                      style={{
+                        backgroundColor: active ? accentFrom : "rgba(255,255,255,0.18)",
+                      }}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{tr.title}</span>
+                    <span className="min-w-0 max-w-[92px] shrink-0 truncate text-[10px] text-foreground/40">
+                      {tr.artist}
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-foreground/35">
+                      {formatTime(tr.duration)}
+                    </span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const PlaylistRow = memo(function PlaylistRow({
+  track,
+  active,
+  playing,
+  onPlay,
+  onRemove,
+}: {
+  track: Track
+  active: boolean
+  playing: boolean
+  onPlay: (id: string) => void
+  onRemove: (id: string) => void
+}) {
+  return (
+    <li className="min-w-0 overflow-hidden">
+      <button
+        onClick={() => onPlay(track.id)}
+        className={cn(
+          "group flex w-full min-w-0 items-center gap-3 px-3 py-2.5 text-left transition-colors",
+          active ? "bg-violet-500/10 dark:bg-emerald-500/10" : "hover:bg-secondary"
+        )}
+      >
+        <div
+          className="relative grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-lg"
+          style={{
+            backgroundImage: `linear-gradient(135deg, ${track.cover.from}, ${track.cover.to})`,
+          }}
+        >
+          {track.coverImage ? (
+            <img
+              src={track.coverImage}
+              alt=""
+              className="absolute inset-0 h-full w-full object-cover"
+              draggable={false}
+            />
+          ) : null}
+          {playing ? (
+            <EqualizerIcon />
+          ) : active ? (
+            <Pause className="relative h-4 w-4 text-white" />
+          ) : (
+            !track.coverImage &&
+            (track.isVideo ? (
+              <Film className="relative h-4 w-4 text-white/90" />
+            ) : (
+              <Music2 className="relative h-4 w-4 text-white/80" />
+            ))
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p
+            className={cn(
+              "truncate text-sm font-medium",
+              active ? "text-violet-500 dark:text-emerald-500" : "text-foreground"
+            )}
+            title={track.title}
+          >
+            {track.title}
+          </p>
+          <p
+            className="truncate text-xs text-muted-foreground"
+            title={track.artist}
+          >
+            {track.artist}
+          </p>
+        </div>
+        <span
+          className="shrink-0 cursor-pointer rounded-md p-1 text-muted-foreground transition hover:bg-secondary hover:text-rose-400"
+          role="button"
+          tabIndex={0}
+          onClick={(e) => {
+            e.stopPropagation()
+            onRemove(track.id)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault()
+              e.stopPropagation()
+              onRemove(track.id)
+            }
+          }}
+          aria-label="Удалить трек"
+          title="Удалить трек"
+        >
+          <Trash2 className="h-4 w-4" />
+        </span>
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {formatTime(track.duration)}
+        </span>
+      </button>
+    </li>
+  )
+})
 
 function EqualizerIcon() {
   return (

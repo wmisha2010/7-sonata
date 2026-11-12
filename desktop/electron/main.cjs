@@ -6,7 +6,7 @@
 // ELECTRON_RUN_AS_NODE) and open it in a native window. This way every app
 // feature — MP3mn search, Rutube video proxy, quality selector, downloads —
 // works locally with no hosted backend.
-const { app, BrowserWindow, shell, dialog } = require("electron")
+const { app, BrowserWindow, shell, dialog, ipcMain } = require("electron")
 const { spawn } = require("node:child_process")
 const path = require("node:path")
 const fs = require("node:fs")
@@ -190,6 +190,129 @@ function isMostlyBlack(image) {
   }
 }
 
+// ---- compact ("windowshade") mode ----
+// The renderer draws a single bar and asks for a small window. Previous bounds
+// are remembered, so leaving the mode restores exactly what the user had.
+// The mode itself is remembered too (userData/window-state.json): quitting in
+// the shade brings the app back as a small window, with no full player first.
+const MINI_WIDTH = 452
+const MINI_MIN_WIDTH = 360
+const MINI_HEIGHT = 172
+const MINI_MIN_HEIGHT = 150
+const FULL_MIN_WIDTH = 1000
+const FULL_MIN_HEIGHT = 640
+
+let savedFullBounds = null // window rect to come back to
+let miniMode = false
+
+function windowStatePath() {
+  try {
+    return path.join(app.getPath("userData"), "window-state.json")
+  } catch {
+    return null
+  }
+}
+
+function readWindowState() {
+  try {
+    const file = windowStatePath()
+    if (!file || !fs.existsSync(file)) return {}
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"))
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeWindowState(next) {
+  try {
+    const file = windowStatePath()
+    if (!file) return
+    fs.writeFileSync(file, JSON.stringify(next, null, 2))
+  } catch {
+    /* unreadable userData — state simply won't persist */
+  }
+}
+
+function persistWindowState() {
+  try {
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+    const miniHeight = win ? win.getBounds().height : MINI_HEIGHT
+    if (!miniMode && win && !win.isMaximized() && !win.isFullScreen()) {
+      savedFullBounds = win.getBounds()
+    }
+    writeWindowState({ mini: miniMode, miniHeight, fullBounds: savedFullBounds })
+  } catch {
+    /* ignore */
+  }
+}
+
+// A shade window is a fixed-size always-on-top bar: the user cannot drag its
+// edges (the renderer asks for the height it needs when the drawer opens).
+function applyMiniWindow(win, on) {
+  if (on) {
+    if (win.isMaximized()) win.unmaximize()
+    if (win.isFullScreen()) win.setFullScreen(false)
+    savedFullBounds = win.getBounds()
+    win.setResizable(false)
+    win.setMaximizable(false)
+    win.setMinimumSize(MINI_MIN_WIDTH, MINI_MIN_HEIGHT)
+    win.setAlwaysOnTop(true, "floating")
+    win.setBounds({ x: savedFullBounds.x, y: savedFullBounds.y, width: MINI_WIDTH, height: MINI_HEIGHT })
+    win.setMaximumSize(MINI_WIDTH, 900)
+  } else {
+    win.setMaximumSize(16384, 16384)
+    win.setMinimumSize(FULL_MIN_WIDTH, FULL_MIN_HEIGHT)
+    win.setResizable(true)
+    win.setMaximizable(true)
+    win.setAlwaysOnTop(false)
+    const b = savedFullBounds
+    if (b) win.setBounds(b)
+    savedFullBounds = null
+  }
+}
+
+ipcMain.handle("sonata:window", (event, action) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed()) return false
+  if (action === "minimize") win.minimize()
+  else if (action === "maximize") win.isMaximized() ? win.unmaximize() : win.maximize()
+  else if (action === "close") win.close()
+  return true
+})
+
+// The compact bar grows when its playlist drawer opens — the renderer asks for
+// the height it needs and the width stays fixed.
+ipcMain.handle("sonata:mini-size", (event, height) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed() || !miniMode) return false
+  const h = Math.max(MINI_MIN_HEIGHT, Math.min(900, Math.round(Number(height) || 0)))
+  const b = win.getBounds()
+  if (b.width !== MINI_WIDTH || b.height !== h) {
+    win.setBounds({ x: b.x, y: b.y, width: MINI_WIDTH, height: h })
+  }
+  persistWindowState()
+  return true
+})
+
+// The renderer asks which mode the window is already in — that decides
+// whether it paints the full player or the shade.
+ipcMain.handle("sonata:mini-state", () => miniMode)
+
+ipcMain.handle("sonata:mini-mode", (event, on) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed()) return false
+  const next = !!on
+  // Idempotent: on launch the renderer re-sends the mode the window is
+  // already in, and that must not reset the saved bounds.
+  if (next === miniMode) return true
+  miniMode = next
+  log(`mini-mode: ${next ? "on" : "off"}`)
+  applyMiniWindow(win, next)
+  persistWindowState()
+  return true
+})
+
 // ---- window ----
 async function createWindow() {
   let url
@@ -223,12 +346,26 @@ async function createWindow() {
     url = `http://127.0.0.1:${port}/`
   }
 
+  // Restored window state: start directly in the mode the app was closed in.
+  const savedState = readWindowState()
+  miniMode = savedState.mini === true
+  savedFullBounds = savedState.fullBounds && typeof savedState.fullBounds === "object" ? savedState.fullBounds : null
+  const savedMiniHeight = Number(savedState.miniHeight) > 0 ? Math.round(Number(savedState.miniHeight)) : MINI_HEIGHT
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 832,
-    minWidth: 1000,
-    minHeight: 640,
+    width: miniMode ? MINI_WIDTH : savedFullBounds?.width || 1280,
+    height: miniMode ? savedMiniHeight : savedFullBounds?.height || 832,
+    ...(miniMode || !savedFullBounds ? {} : { x: savedFullBounds.x, y: savedFullBounds.y }),
+    minWidth: miniMode ? MINI_MIN_WIDTH : FULL_MIN_WIDTH,
+    minHeight: miniMode ? MINI_MIN_HEIGHT : FULL_MIN_HEIGHT,
+    // A shade launch is a small, fixed, always-on-top bar from the first frame.
+    resizable: !miniMode,
+    maximizable: !miniMode,
+    alwaysOnTop: miniMode,
     show: false,
+    // No OS title bar: the player draws its own (src/.../music-player.tsx).
+    // This is what lets the compact bar be a bare little panel.
+    frame: false,
     autoHideMenuBar: true,
     title: "7-Sonata",
     backgroundColor: "#09090b",
@@ -237,6 +374,8 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // The only bridge to the renderer: the compact "windowshade" mode.
+      preload: path.join(__dirname, "preload.cjs"),
       // No timer/rAF throttling when the window is hidden or minimized —
       // progress bars, HLS and PiP video must keep running in the background.
       backgroundThrottling: false,
@@ -246,7 +385,13 @@ async function createWindow() {
     },
   })
 
-  mainWindow.once("ready-to-show", () => mainWindow.show())
+  mainWindow.once("ready-to-show", () => {
+    if (miniMode) {
+      mainWindow.setAlwaysOnTop(true, "floating")
+      log(`started in compact mode (${MINI_WIDTH}x${mainWindow.getBounds().height})`)
+    }
+    mainWindow.show()
+  })
 
   // Diagnostics: anything that could leave the window dark gets logged.
   mainWindow.webContents.on("did-finish-load", () => log("page did-finish-load"))
@@ -269,6 +414,8 @@ async function createWindow() {
     return { action: "deny" }
   })
 
+  // Remember where/what the window was, so the next launch opens the same way.
+  mainWindow.on("close", () => persistWindowState())
   mainWindow.on("closed", () => { mainWindow = null })
 
   log(`loading ${url}`)

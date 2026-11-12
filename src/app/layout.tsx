@@ -8,11 +8,11 @@ import { Toaster } from "@/components/ui/toaster";
 
 export const metadata: Metadata = {
   title: "7-Sonata — Музыкальный плеер",
-  description: "Лёгкий и красивый музыкальный плеер: демо-треки, загрузка своих файлов, визуализатор, плейлист.",
+  description: "Музыкальный плеер: поиск и стриминг музыки, видеотреки, визуализатор и плейлист.",
   keywords: ["music player", "плеер", "музыка", "music", "Next.js"],
-  authors: [{ name: "Z.ai Team" }],
+  authors: [{ name: "wmisha2010" }],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/logo.svg",
   },
 };
 

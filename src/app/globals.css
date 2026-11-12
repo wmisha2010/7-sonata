@@ -174,3 +174,14 @@
   scrollbar-width: thin;
   scrollbar-color: var(--muted-foreground) transparent;
 }
+
+/* Frameless Electron window: drag regions (see the custom title bar). */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-drag button,
+.app-drag input,
+.app-drag [role="slider"],
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
