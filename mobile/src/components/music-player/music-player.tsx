@@ -39,6 +39,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { formatTime } from "@/lib/format"
+import { APP_VERSION } from "@/lib/version"
 import { type Track } from "@/lib/tracks"
 import { extractAudioMeta } from "@/lib/metadata"
 import { enrichFromITunes, getDurationFromAudio } from "@/lib/metadata-enrichment"
@@ -3368,7 +3369,7 @@ export function MusicPlayer() {
           <div className="flex items-center gap-2 truncate">
             <Disc3 className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-emerald-400" />
             <span className="shrink-0 font-semibold text-foreground">7-Sonata</span>
-            <span className="shrink-0 text-foreground/50">v1.8.7</span>
+            <span className="shrink-0 text-foreground/50">v{APP_VERSION}</span>
             {msDiag.mode === "err" && (
               <span className="shrink-0 text-amber-500 dark:text-amber-400" title={`MediaSession: ${msDiag.err}`}>
                 MS:ERR ({msDiag.err})
