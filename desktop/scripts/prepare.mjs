@@ -36,6 +36,9 @@ function buildNext(extraArgs = "") {
   return existsSync(path.join(root, ".next", "standalone", "server.js"))
 }
 
+console.log("0/4  synchronizing the app version (src/lib/version.ts)")
+run("node ../tools/sync-version.mjs", desktopDir)
+
 console.log("1/4  next build (production, standalone)")
 let built = buildNext()
 

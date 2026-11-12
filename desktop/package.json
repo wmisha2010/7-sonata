@@ -8,7 +8,8 @@
   "main": "electron/main.cjs",
   "private": true,
   "scripts": {
-    "stage": "node scripts/stage.mjs",
+    "version:sync": "node ../tools/sync-version.mjs",
+    "stage": "node ../tools/sync-version.mjs && node scripts/stage.mjs",
     "start": "electron .",
     "dist": "npm run stage && electron-builder",
     "dist:win": "npm run stage && electron-builder --win",
