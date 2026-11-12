@@ -83,3 +83,6 @@ android-sdk/
 android-sdk/
 tool-results/
 tool-results/
+
+# local screen recordings from manual checks
+recordings/
