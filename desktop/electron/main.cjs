@@ -325,6 +325,21 @@ let tray = null
 let hiddenToTray = false
 
 async function trayIconImage() {
+  // The full app icon (title + equalizer) turns into an unreadable dark blob at
+  // 16 px, so the tray ships its own multi-size glyph bundled next to this file.
+  try {
+    const img = nativeImage.createFromPath(path.join(__dirname, "tray.ico"))
+    if (!img.isEmpty()) return img
+  } catch {
+    /* fall through */
+  }
+  // .ico decoding can miss inside an asar archive — a bundled PNG always works.
+  try {
+    const png = nativeImage.createFromBuffer(require("fs").readFileSync(path.join(__dirname, "tray.png")))
+    if (!png.isEmpty()) return png
+  } catch {
+    /* fall through */
+  }
   // Packaged: the exe carries the app icon — Electron can extract it.
   try {
     const icon = await app.getFileIcon(process.execPath, { size: "small" })
@@ -334,8 +349,8 @@ async function trayIconImage() {
   }
   // Dev (`electron .`): the build icon sits next to the electron folder.
   try {
-    const img = nativeImage.createFromPath(path.join(__dirname, "..", "build", "icon.png"))
-    if (!img.isEmpty()) return img.resize({ width: 16, height: 16 })
+    const png = nativeImage.createFromPath(path.join(__dirname, "..", "build", "icon.png"))
+    if (!png.isEmpty()) return png.resize({ width: 16, height: 16 })
   } catch {
     /* no icon */
   }

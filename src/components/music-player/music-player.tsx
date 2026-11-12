@@ -33,6 +33,7 @@ import {
   Minimize2,
   Minus,
   Square,
+  Droplets,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { APP_VERSION } from "@/lib/version"
@@ -120,6 +121,11 @@ type SortMode = "default" | "title" | "artist" | "duration" | "date"
 
 // UI settings that survive a reload / app relaunch.
 const SETTINGS_KEY = "sonata-settings-v1"
+// Shade panel opacity: below 0.3 the text stops being readable over the
+// desktop, above 1 there is nothing left to make transparent.
+const MIN_COMPACT_OPACITY = 0.3
+const DEFAULT_COMPACT_OPACITY = 0.85
+const clampCompactOpacity = (v: number) => Math.min(1, Math.max(MIN_COMPACT_OPACITY, v))
 interface PersistedSettings {
   theme: Theme
   volume: number
@@ -131,6 +137,8 @@ interface PersistedSettings {
   playlistCollapsed: boolean
   /** v1.8.7: the shade state survives a restart. */
   compact: boolean
+  /** Shade panel opacity, 0.3 … 1 (the desktop shows through below 1). */
+  compactOpacity?: number
 }
 
 // The Electron shell exposes a tiny bridge (see desktop/electron/preload.cjs).
@@ -209,6 +217,8 @@ export function MusicPlayer() {
   const [compact, setCompact] = useState(false)
   // Playlist drawer inside the compact bar.
   const [compactPlaylist, setCompactPlaylist] = useState(false)
+  // Shade background opacity — how much of the desktop shows through the bar.
+  const [compactOpacity, setCompactOpacity] = useState(DEFAULT_COMPACT_OPACITY)
   // The Electron window runs frameless (no OS title bar), so the app draws its
   // own slim one. Detected after mount to keep SSR markup identical.
   const [framelessShell, setFramelessShell] = useState(false)
@@ -448,6 +458,8 @@ export function MusicPlayer() {
       if (typeof s.playlistCollapsed === "boolean") setPlaylistCollapsed(s.playlistCollapsed)
       // v1.8.7: relaunch in the same mode the app was closed in.
       if (typeof s.compact === "boolean") setCompact(s.compact)
+      if (typeof s.compactOpacity === "number" && Number.isFinite(s.compactOpacity))
+        setCompactOpacity(clampCompactOpacity(s.compactOpacity))
     } catch {
       /* unreadable/corrupt entry — keep the defaults */
     }
@@ -497,12 +509,13 @@ export function MusicPlayer() {
         sortAsc,
         playlistCollapsed,
         compact,
+        compactOpacity,
       }
       window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
     } catch {
       /* private mode / quota — settings simply won't persist */
     }
-  }, [theme, volume, muted, shuffle, repeatMode, sortMode, sortAsc, playlistCollapsed, compact])
+  }, [theme, volume, muted, shuffle, repeatMode, sortMode, sortAsc, playlistCollapsed, compact, compactOpacity])
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === "dark" ? "light" : "dark"))
@@ -2383,6 +2396,10 @@ export function MusicPlayer() {
     <div
       className={cn(
         "relative flex min-h-screen flex-col overflow-x-hidden bg-background text-foreground transition-colors duration-700",
+        // Desktop window: the app owns the page, so it fits the window exactly
+        // (the playlist scrolls inside its panel instead of pushing the footer
+        // off-screen). Narrow windows keep the normal page scroll.
+        framelessShell && !compact && "lg:h-screen lg:overflow-hidden",
         // Frameless shade: the window is transparent and only the compact
         // panel may paint pixels.
         framelessShell && compact && "sonata-compact-shell",
@@ -2595,6 +2612,9 @@ export function MusicPlayer() {
         // v1.8.3: no max-width cap — when the window is maximized the player,
         // video and playlist all stretch to fill the screen edge-to-edge.
         "relative z-10 flex w-full min-w-0 flex-1 flex-col gap-6 px-4 pt-4 pb-2 sm:px-6 lg:flex-row lg:px-8",
+        // Lets the playlist panel shrink to the window instead of stretching
+        // it; if the player card is taller than the window, main scrolls.
+        framelessShell && !compact && "lg:min-h-0 lg:overflow-y-auto",
         // On mobile + video mode, remove horizontal padding so the video
         // spans the full screen width (edge-to-edge).
         currentTrack?.isVideo ? "px-0 sm:px-6" : "px-4"
@@ -2989,7 +3009,7 @@ export function MusicPlayer() {
             space after the player/video section (no dead gap on the right
             on maximized windows). */}
         {!playlistCollapsed && (
-        <aside className="flex w-full min-w-0 flex-col overflow-hidden lg:min-w-[200px] lg:max-h-[calc(100vh_-_260px)]" style={{ flex: "1 1 0%" }}>
+        <aside className="flex w-full min-w-0 flex-col overflow-hidden lg:min-w-[200px]" style={{ flex: "1 1 0%" }}>
           <div className="flex h-full flex-col overflow-hidden rounded-3xl border border-border/50 bg-card/60 backdrop-blur-2xl"
                style={{
                  backgroundColor: currentTrack
@@ -3409,6 +3429,8 @@ export function MusicPlayer() {
           onToggleMute={() => setMuted((m) => !m)}
           onToggleShuffle={() => setShuffle((s) => !s)}
           onCycleRepeat={() => setRepeatMode((m) => (m === "off" ? "all" : m === "all" ? "one" : "off"))}
+          opacity={compactOpacity}
+          onOpacityChange={setCompactOpacity}
           onExpand={exitCompact}
           onHideToTray={() => windowAction("tray")}
           onClose={() => {
@@ -3588,6 +3610,8 @@ function CompactPlayer({
   onExpand,
   onHideToTray,
   onClose,
+  opacity,
+  onOpacityChange,
 }: {
   track: Track | null
   playing: boolean
@@ -3619,7 +3643,11 @@ function CompactPlayer({
   onExpand: () => void
   onHideToTray: () => void
   onClose: () => void
+  /** Background opacity of the shade (0.3 … 1), persisted by the parent. */
+  opacity: number
+  onOpacityChange: (value: number) => void
 }) {
+  const [opacityOpen, setOpacityOpen] = useState(false)
   const pct = duration > 0 ? Math.min(100, Math.max(0, (progress / duration) * 100)) : 0
   // Wheel over the bar changes the volume (5% per notch) — the Winamp habit.
   // The playlist drawer keeps its own scrolling.
@@ -3683,9 +3711,10 @@ function CompactPlayer({
         className={cn(
           // Translucent surface: the artwork/gradient layers below stay semi
           // transparent, so the desktop shows through the shade.
-          "isolate relative flex w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/15 bg-[#0d0d11]/85 text-white shadow-2xl backdrop-blur-xl",
+          "isolate relative flex w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/15 text-white shadow-2xl backdrop-blur-xl",
           frameless && "h-full max-w-none rounded-xl shadow-none"
         )}
+        style={{ backgroundColor: `rgba(13, 13, 17, ${opacity})` }}
       >
         {/* Same colour treatment as the full player: the cover, blurred,
             washed with the track's gradient. */}
@@ -3699,6 +3728,7 @@ function CompactPlayer({
               backgroundPosition: "center",
               filter: "blur(26px) saturate(1.6)",
               transform: "scale(1.4)",
+              opacity: 0.35 * Math.min(1, opacity / DEFAULT_COMPACT_OPACITY),
             }}
           />
         )}
@@ -3706,7 +3736,7 @@ function CompactPlayer({
           aria-hidden
           className="pointer-events-none absolute inset-0 -z-10"
           style={{
-            background: `linear-gradient(180deg, ${accentTo}26 0%, rgba(13,13,17,0.72) 45%, rgba(13,13,17,0.86) 100%)`,
+            background: `linear-gradient(180deg, ${accentTo}26 0%, rgba(13,13,17,${(opacity * 0.85).toFixed(2)}) 45%, rgba(13,13,17,${opacity}) 100%)`,
           }}
         />
         {/* Title bar — drag area; window buttons keep working because the
@@ -3719,7 +3749,20 @@ function CompactPlayer({
             </span>
             <span className="text-[9px] text-white/30">v{APP_VERSION}</span>
           </div>
-          <div className="app-no-drag flex items-center">
+          <div className="app-no-drag relative flex items-center">
+            <button
+              type="button"
+              onClick={() => setOpacityOpen((v) => !v)}
+              className={cn(
+                "grid h-5 w-5 place-items-center rounded transition hover:bg-white/10 hover:text-white",
+                opacityOpen ? "bg-white/10 text-white" : "text-white/60"
+              )}
+              aria-label="Прозрачность шторки"
+              aria-pressed={opacityOpen}
+              title="Прозрачность"
+            >
+              <Droplets className="h-3 w-3" />
+            </button>
             <button
               type="button"
               onClick={onExpand}
@@ -3750,6 +3793,26 @@ function CompactPlayer({
               >
                 <X className="h-3 w-3" />
               </button>
+            )}
+            {opacityOpen && (
+              <>
+                {/* Click anywhere else closes the popover. */}
+                <div className="fixed inset-0 z-20" onClick={() => setOpacityOpen(false)} />
+                <div className="absolute right-0 top-[26px] z-30 w-[150px] rounded-lg border border-white/15 bg-[#0d0d11]/95 p-2 shadow-xl">
+                  <div className="mb-1 flex items-center justify-between text-[9px] font-medium uppercase tracking-[0.12em] text-white/50">
+                    <span>Прозрачность</span>
+                    <span className="tabular-nums text-white/80">{Math.round(opacity * 100)}%</span>
+                  </div>
+                  <Slider
+                    value={[Math.round(opacity * 100)]}
+                    min={Math.round(MIN_COMPACT_OPACITY * 100)}
+                    max={100}
+                    step={1}
+                    onValueChange={(v) => onOpacityChange(clampCompactOpacity(v[0] / 100))}
+                    aria-label="Прозрачность"
+                  />
+                </div>
+              </>
             )}
           </div>
         </div>
