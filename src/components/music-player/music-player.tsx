@@ -238,10 +238,6 @@ export function MusicPlayer() {
   // Gates the first paint until the saved UI settings are applied — otherwise
   // a restart in compact mode flashes the full player inside the small window.
   const [uiReady, setUiReady] = useState(false)
-  // The cover art and the blurred backdrop behind it come from the same image.
-  // Decoding it before the window is reported ready keeps that first player
-  // frame cheap, so even the fallback timeout reveals a finished frame.
-  const [artReady, setArtReady] = useState(false)
   useEffect(() => {
     if (desktopApi()?.framelessShell) setFramelessShell(true)
   }, [])
@@ -519,7 +515,7 @@ export function MusicPlayer() {
   // pacing is back to normal — two short consecutive frames — with a hard cap so
   // a permanently slow frame can never keep the window hidden.
   useEffect(() => {
-    if (!tracksReady || !uiReady || !artReady) return
+    if (!tracksReady || !uiReady) return
     const api = desktopApi()
     if (!api?.appReady) return
     let cancelled = false
@@ -543,45 +539,7 @@ export function MusicPlayer() {
       cancelled = true
       cancelAnimationFrame(raf)
     }
-  }, [tracksReady, uiReady, artReady])
-
-  // Decode the current cover (which is also the source of the blurred backdrop)
-  // before the readiness report above: image decode is what stretches the first
-  // player frame on a slow machine, and a fallback that fires mid-raster would
-  // bring the splash frame back. Bounded, so a broken image cannot hold the
-  // window hidden.
-  useEffect(() => {
-    if (!tracksReady || !uiReady) return
-    const src = currentTrack?.coverImage
-    if (!src) {
-      setArtReady(true)
-      return
-    }
-    // The playlist already renders the same cover, so its bitmap is decoded and
-    // can be reused — a second decode would only delay the first paint.
-    const shown = Array.from(document.images).some((i) => i.src === src && i.complete && i.naturalWidth > 0)
-    if (shown) {
-      setArtReady(true)
-      return
-    }
-    let cancelled = false
-    const done = () => {
-      if (!cancelled) setArtReady(true)
-    }
-    const timer = setTimeout(done, 700)
-    const img = new Image()
-    img.onload = () => {
-      // decode() resolves once the bitmap can be painted, not when it arrives.
-      if (typeof img.decode === "function") img.decode().then(done, done)
-      else done()
-    }
-    img.onerror = done
-    img.src = src
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [tracksReady, uiReady, currentTrack?.coverImage])
+  }, [tracksReady, uiReady])
 
   // Track whether the shell actually shows the window (tray / minimized).
   useEffect(() => {
