@@ -237,11 +237,13 @@ function writeWindowState(next) {
 function persistWindowState() {
   try {
     const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
-    const miniHeight = win ? win.getBounds().height : MINI_HEIGHT
     if (!miniMode && win && !win.isMaximized() && !win.isFullScreen()) {
       savedFullBounds = win.getBounds()
     }
-    writeWindowState({ mini: miniMode, miniHeight, fullBounds: savedFullBounds })
+    // Only the mode and the full-size rect are remembered. The shade always
+    // reopens at its base height: the playlist drawer is runtime state, and
+    // restoring it made the window start tall and then shrink.
+    writeWindowState({ mini: miniMode, fullBounds: savedFullBounds })
   } catch {
     /* ignore */
   }
@@ -291,7 +293,6 @@ ipcMain.handle("sonata:mini-size", (event, height) => {
   if (b.width !== MINI_WIDTH || b.height !== h) {
     win.setBounds({ x: b.x, y: b.y, width: MINI_WIDTH, height: h })
   }
-  persistWindowState()
   return true
 })
 
@@ -350,11 +351,10 @@ async function createWindow() {
   const savedState = readWindowState()
   miniMode = savedState.mini === true
   savedFullBounds = savedState.fullBounds && typeof savedState.fullBounds === "object" ? savedState.fullBounds : null
-  const savedMiniHeight = Number(savedState.miniHeight) > 0 ? Math.round(Number(savedState.miniHeight)) : MINI_HEIGHT
 
   mainWindow = new BrowserWindow({
     width: miniMode ? MINI_WIDTH : savedFullBounds?.width || 1280,
-    height: miniMode ? savedMiniHeight : savedFullBounds?.height || 832,
+    height: miniMode ? MINI_HEIGHT : savedFullBounds?.height || 832,
     ...(miniMode || !savedFullBounds ? {} : { x: savedFullBounds.x, y: savedFullBounds.y }),
     minWidth: miniMode ? MINI_MIN_WIDTH : FULL_MIN_WIDTH,
     minHeight: miniMode ? MINI_MIN_HEIGHT : FULL_MIN_HEIGHT,
