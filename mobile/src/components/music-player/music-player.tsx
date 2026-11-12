@@ -29,6 +29,8 @@ import {
   X,
   PanelLeft,
   PanelLeftOpen,
+  Maximize2,
+  Minimize2,
   Download,
   Smartphone,
   Monitor,
@@ -163,6 +165,20 @@ const mediaSessionApi = {
 
 type RepeatMode = "off" | "all" | "one"
 type Theme = "dark" | "light"
+
+// UI settings that survive an app restart (the Capacitor WebView keeps
+// localStorage between launches). Ported from the desktop player.
+const SETTINGS_KEY = "sonata-settings-v1"
+interface PersistedSettings {
+  theme: Theme
+  volume: number
+  muted: boolean
+  shuffle: boolean
+  repeatMode: RepeatMode
+  sortMode: "default" | "title" | "artist" | "duration" | "date"
+  sortAsc: boolean
+  playlistCollapsed: boolean
+}
 
 export function MusicPlayer() {
   // Start empty — users add their own music.
@@ -439,6 +455,94 @@ export function MusicPlayer() {
       root.classList.remove("dark")
     }
   }, [theme])
+
+  // ---- Persisted UI settings ----
+  // Theme, volume, repeat/shuffle and the playlist view options used to reset
+  // on every start. Read in an effect (not in the state initializer) so the
+  // first client render matches the markup.
+  const settingsFirstSaveRef = useRef(true)
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SETTINGS_KEY)
+      if (!raw) return
+      const s = JSON.parse(raw) as Partial<PersistedSettings>
+      if (s.theme === "light" || s.theme === "dark") setTheme(s.theme)
+      if (typeof s.volume === "number" && Number.isFinite(s.volume))
+        setVolume(Math.min(1, Math.max(0, s.volume)))
+      if (typeof s.muted === "boolean") setMuted(s.muted)
+      if (typeof s.shuffle === "boolean") setShuffle(s.shuffle)
+      if (s.repeatMode === "off" || s.repeatMode === "all" || s.repeatMode === "one")
+        setRepeatMode(s.repeatMode)
+      if (
+        s.sortMode === "default" ||
+        s.sortMode === "title" ||
+        s.sortMode === "artist" ||
+        s.sortMode === "duration" ||
+        s.sortMode === "date"
+      )
+        setSortMode(s.sortMode)
+      if (typeof s.sortAsc === "boolean") setSortAsc(s.sortAsc)
+      if (typeof s.playlistCollapsed === "boolean") setPlaylistCollapsed(s.playlistCollapsed)
+    } catch {
+      /* unreadable/corrupt entry — keep the defaults */
+    }
+  }, [])
+  useEffect(() => {
+    // Skip the mount pass — it would write the defaults before the loader
+    // above has applied the stored values.
+    if (settingsFirstSaveRef.current) {
+      settingsFirstSaveRef.current = false
+      return
+    }
+    try {
+      const s: PersistedSettings = {
+        theme,
+        volume,
+        muted,
+        shuffle,
+        repeatMode,
+        sortMode,
+        sortAsc,
+        playlistCollapsed,
+      }
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
+    } catch {
+      /* storage disabled — settings simply won't persist */
+    }
+  }, [theme, volume, muted, shuffle, repeatMode, sortMode, sortAsc, playlistCollapsed])
+
+  // ---- Mini player ("windowshade") ----
+  // On a phone there is no window to shrink, so the bar simply covers the
+  // page: playback keeps running because the player stays mounted.
+  const [compact, setCompact] = useState(false)
+  const [compactPlaylist, setCompactPlaylist] = useState(false)
+  const enterCompact = useCallback(() => {
+    setCompact(true)
+    setCompactPlaylist(false)
+  }, [])
+  const exitCompact = useCallback(() => {
+    setCompact(false)
+    setCompactPlaylist(false)
+  }, [])
+  useEffect(() => {
+    if (!compact) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") exitCompact()
+    }
+    window.addEventListener("keydown", onKey)
+    // The page underneath stays mounted and is taller than the bar — without
+    // this the WebView keeps a scrollable page behind the overlay.
+    const html = document.documentElement
+    const prevHtml = html.style.overflow
+    const prevBody = document.body.style.overflow
+    html.style.overflow = "hidden"
+    document.body.style.overflow = "hidden"
+    return () => {
+      window.removeEventListener("keydown", onKey)
+      html.style.overflow = prevHtml
+      document.body.style.overflow = prevBody
+    }
+  }, [compact, exitCompact])
 
   const toggleTheme = useCallback(() => {
     setTheme((t) => (t === "dark" ? "light" : "dark"))
@@ -3336,6 +3440,16 @@ export function MusicPlayer() {
             <Button
               variant="ghost"
               size="icon"
+              onClick={enterCompact}
+              className="h-7 w-7 text-foreground/80 hover:text-foreground"
+              aria-label="Окно-шторка"
+              title="Мини-плеер"
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={toggleTheme}
               className="h-7 w-7 text-foreground/80 hover:text-foreground"
               aria-label={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
@@ -3363,6 +3477,42 @@ export function MusicPlayer() {
           </div>
         </div>
       </footer>
+
+      {compact && (
+        <CompactPlayer
+          track={currentTrack ?? null}
+          playing={isPlaying}
+          progress={progress}
+          duration={duration || currentTrack?.duration || 0}
+          volume={volume}
+          muted={muted}
+          shuffle={shuffle}
+          repeatMode={repeatMode}
+          analyserRef={analyserRef}
+          accentFrom={currentTrack ? currentTrack.cover.from : theme === "dark" ? "#34d399" : "#a78bfa"}
+          accentTo={currentTrack ? currentTrack.cover.to : theme === "dark" ? "#22d3ee" : "#e879f9"}
+          tracks={sortedTracks}
+          currentTrackId={currentTrack?.id ?? null}
+          playlistOpen={compactPlaylist}
+          onTogglePlaylist={() => setCompactPlaylist((v) => !v)}
+          onSelectTrack={(id) => {
+            const i = tracks.findIndex((t) => t.id === id)
+            if (i >= 0) playIndex(i)
+          }}
+          onTogglePlay={togglePlay}
+          onPrev={playPrev}
+          onNext={playNext}
+          onSeek={seek}
+          onVolumeChange={(v) => {
+            setVolume(v)
+            setMuted(v === 0)
+          }}
+          onToggleMute={() => setMuted((m) => !m)}
+          onToggleShuffle={() => setShuffle((s) => !s)}
+          onCycleRepeat={() => setRepeatMode((m) => (m === "off" ? "all" : m === "all" ? "one" : "off"))}
+          onExpand={exitCompact}
+        />
+      )}
     </div>
   )
 }
@@ -3413,6 +3563,401 @@ function roundRect(
   ctx.arcTo(x, y + h, x, y, radius)
   ctx.arcTo(x, y, x + w, y, radius)
   ctx.closePath()
+}
+
+// ---- Mini player ("windowshade") ----
+// The same bar as the desktop app, minus the desktop window plumbing: here it
+// is just an overlay over the still-mounted page, so playback never restarts.
+function MiniSpectrum({
+  analyserRef,
+  playing,
+  from,
+  to,
+}: {
+  analyserRef: React.RefObject<AnalyserNode | null>
+  playing: boolean
+  from: string
+  to: string
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const playingRef = useRef(playing)
+  useEffect(() => {
+    playingRef.current = playing
+  }, [playing])
+
+  useEffect(() => {
+    const BARS = 18
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!canvas || !ctx) return
+    const levels = new Float32Array(BARS)
+    let buf: Uint8Array<ArrayBuffer> | null = null
+    let raf = 0
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr
+        canvas.height = h * dpr
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, w, h)
+
+      const analyser = analyserRef.current
+      let data: Uint8Array | null = null
+      if (analyser && playingRef.current) {
+        if (!buf || buf.length !== analyser.frequencyBinCount) buf = new Uint8Array(analyser.frequencyBinCount)
+        try {
+          analyser.getByteFrequencyData(buf)
+          let sum = 0
+          for (let i = 0; i < buf.length; i++) sum += buf[i]
+          // All-zero samples == CORS-silenced stream → keep the synthetic wave.
+          if (sum > 0) data = buf
+        } catch {
+          data = null
+        }
+      }
+
+      const t = performance.now() / 1000
+      const gap = 2
+      const barW = (w - gap * (BARS - 1)) / BARS
+      for (let i = 0; i < BARS; i++) {
+        let target: number
+        if (data) {
+          const idx = Math.min(data.length - 1, 1 + Math.floor((i / BARS) * data.length * 0.6))
+          target = Math.sqrt(data[idx] / 255)
+        } else if (playingRef.current) {
+          target = 0.28 + 0.22 * Math.sin(t * 6 + i * 0.7) + 0.12 * Math.sin(t * 11 + i * 1.3)
+        } else {
+          target = 0.05
+        }
+        levels[i] += (target - levels[i]) * 0.35
+        const barH = Math.max(2, Math.min(h, levels[i] * h))
+        const grad = ctx.createLinearGradient(0, h, 0, h - barH)
+        grad.addColorStop(0, from)
+        grad.addColorStop(1, to)
+        ctx.fillStyle = grad
+        ctx.fillRect(i * (barW + gap), h - barH, barW, barH)
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [analyserRef, from, to])
+
+  return <canvas ref={canvasRef} className="h-6 w-full" aria-hidden />
+}
+
+function CompactPlayer({
+  track,
+  playing,
+  progress,
+  duration,
+  volume,
+  muted,
+  shuffle,
+  repeatMode,
+  analyserRef,
+  accentFrom,
+  accentTo,
+  tracks,
+  currentTrackId,
+  playlistOpen,
+  onTogglePlaylist,
+  onSelectTrack,
+  onTogglePlay,
+  onPrev,
+  onNext,
+  onSeek,
+  onVolumeChange,
+  onToggleMute,
+  onToggleShuffle,
+  onCycleRepeat,
+  onExpand,
+}: {
+  track: Track | null
+  playing: boolean
+  progress: number
+  duration: number
+  volume: number
+  muted: boolean
+  shuffle: boolean
+  repeatMode: RepeatMode
+  analyserRef: React.RefObject<AnalyserNode | null>
+  accentFrom: string
+  accentTo: string
+  tracks: Track[]
+  currentTrackId: string | null
+  playlistOpen: boolean
+  onTogglePlaylist: () => void
+  onSelectTrack: (id: string) => void
+  onTogglePlay: () => void
+  onPrev: () => void
+  onNext: () => void
+  onSeek: (value: number) => void
+  onVolumeChange: (value: number) => void
+  onToggleMute: () => void
+  onToggleShuffle: () => void
+  onCycleRepeat: () => void
+  onExpand: () => void
+}) {
+  const pct = duration > 0 ? Math.min(100, Math.max(0, (progress / duration) * 100)) : 0
+  const repeatActive = repeatMode !== "off"
+  const repeatTitle =
+    repeatMode === "off" ? "Повтор выключен" : repeatMode === "all" ? "Повтор всего списка" : "Повтор одной"
+  const onSeekClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (duration <= 0) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const ratio = (e.clientX - r.left) / r.width
+    onSeek(Math.min(duration, Math.max(0, ratio * duration)))
+  }
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-2 backdrop-blur-md">
+      <div className="isolate relative flex max-h-[92vh] w-full max-w-[452px] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0d0d11] text-foreground shadow-2xl">
+        {/* Same colour treatment as the full player: the cover, blurred,
+            washed with the track's gradient. */}
+        {track?.coverImage && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 opacity-50"
+            style={{
+              backgroundImage: `url(${track.coverImage})`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              filter: "blur(26px) saturate(1.6)",
+              transform: "scale(1.4)",
+            }}
+          />
+        )}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 -z-10"
+          style={{
+            background: `linear-gradient(180deg, ${accentTo}1f 0%, #0d0d11e6 45%, #0d0d11f7 100%)`,
+          }}
+        />
+        <div className="flex h-[26px] shrink-0 items-center justify-between border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent pl-2.5 pr-1">
+          <div className="flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentFrom }} />
+            <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-foreground/70">
+              7-Sonata
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onExpand}
+            className="grid h-5 w-5 place-items-center rounded text-foreground/60 transition hover:bg-white/10 hover:text-foreground"
+            aria-label="Развернуть окно"
+            title="Свернуть"
+          >
+            <Maximize2 className="h-3 w-3" />
+          </button>
+        </div>
+
+        {/* Display: cover art + track + spectrum */}
+        <div className="flex shrink-0 items-stretch gap-2 px-2.5 pb-1.5 pt-2">
+          <div
+            className="relative h-[62px] w-[62px] shrink-0 overflow-hidden rounded-md border border-white/10 shadow-lg"
+            style={{ backgroundImage: `linear-gradient(135deg, ${accentFrom}, ${accentTo})` }}
+          >
+            {track?.coverImage ? (
+              <img
+                src={track.coverImage}
+                alt=""
+                className="absolute inset-0 h-full w-full object-cover"
+                draggable={false}
+              />
+            ) : (
+              <Disc3
+                className={cn(
+                  "absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 text-white/85 drop-shadow",
+                  playing && "animate-spin-slow"
+                )}
+              />
+            )}
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col justify-between gap-1">
+            <div className="min-w-0">
+              <p className="truncate text-[12px] font-semibold leading-tight" title={track?.title ?? ""}>
+                {track?.title ?? "Ничего не играет"}
+              </p>
+              <div className="mt-0.5 flex items-baseline gap-1">
+                <p
+                  className="min-w-0 flex-1 truncate text-[10px] leading-tight text-foreground/50"
+                  title={track ? `${track.artist} · ${track.album}` : ""}
+                >
+                  {track ? `${track.artist}${track.album ? ` · ${track.album}` : ""}` : ""}
+                </p>
+                <span
+                  className="shrink-0 text-[11px] font-semibold leading-none tabular-nums"
+                  style={{ color: accentFrom, textShadow: `0 0 10px ${accentFrom}55` }}
+                >
+                  {formatTime(progress)}
+                </span>
+                <span className="shrink-0 text-[9px] leading-none tabular-nums text-foreground/35">
+                  / {formatTime(duration)}
+                </span>
+              </div>
+            </div>
+            <MiniSpectrum analyserRef={analyserRef} playing={playing} from={accentFrom} to={accentTo} />
+          </div>
+        </div>
+
+        {/* Position */}
+        <div className="shrink-0 px-2.5 pb-1.5">
+          <div
+            role="slider"
+            aria-label="Позиция трека"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(duration)}
+            aria-valuenow={Math.round(progress)}
+            tabIndex={0}
+            onClick={onSeekClick}
+            className="h-2 w-full cursor-pointer overflow-hidden rounded-full bg-white/10"
+          >
+            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: accentFrom }} />
+          </div>
+        </div>
+
+        {/* Transport + volume + view toggles */}
+        <div className="flex shrink-0 items-center gap-0.5 border-t border-white/10 bg-white/[0.02] px-1.5 py-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onPrev}
+            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+            aria-label="Предыдущий трек"
+            title="Предыдущий трек"
+          >
+            <SkipBack className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onTogglePlay}
+            className="h-9 w-9 rounded-full"
+            style={{ backgroundColor: `${accentFrom}26`, color: accentFrom }}
+            aria-label={playing ? "Пауза" : "Играть"}
+            title={playing ? "Пауза" : "Играть"}
+          >
+            {playing ? <Pause className="h-4 w-4" /> : <Play className="ml-0.5 h-4 w-4" />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onNext}
+            className="h-8 w-8 text-foreground/75 hover:text-foreground"
+            aria-label="Следующий трек"
+            title="Следующий трек"
+          >
+            <SkipForward className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onToggleMute}
+            className="h-8 w-8 text-foreground/60 hover:text-foreground"
+            aria-label={muted ? "Включить звук" : "Выключить звук"}
+            title={muted ? "Включить звук" : "Выключить звук"}
+          >
+            {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+          </Button>
+          <Slider
+            value={[muted ? 0 : Math.round(volume * 100)]}
+            max={100}
+            step={1}
+            onValueChange={(v) => onVolumeChange(v[0] / 100)}
+            className="w-[64px]"
+            aria-label="Громкость"
+          />
+          <div className="ml-auto flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onToggleShuffle}
+              className="grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5"
+              style={{ color: shuffle ? accentFrom : undefined }}
+              aria-pressed={shuffle}
+              aria-label="Перемешивание"
+              title="Перемешивание"
+            >
+              <Shuffle className={cn("h-3.5 w-3.5", !shuffle && "text-foreground/40")} />
+            </button>
+            <button
+              type="button"
+              onClick={onCycleRepeat}
+              className="grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5"
+              style={{ color: repeatActive ? accentFrom : undefined }}
+              aria-label={repeatTitle}
+              title={repeatTitle}
+            >
+              {repeatMode === "one" ? (
+                <Repeat1 className={cn("h-3.5 w-3.5", !repeatActive && "text-foreground/40")} />
+              ) : (
+                <Repeat className={cn("h-3.5 w-3.5", !repeatActive && "text-foreground/40")} />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onTogglePlaylist}
+              className={cn(
+                "grid h-7 w-7 place-items-center rounded-md transition hover:bg-white/5",
+                playlistOpen ? "text-foreground" : "text-foreground/45 hover:text-foreground/80"
+              )}
+              style={{ color: playlistOpen ? accentFrom : undefined }}
+              aria-pressed={playlistOpen}
+              aria-label="Плейлист"
+              title="Плейлист"
+            >
+              <ListMusic className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Playlist drawer */}
+        {playlistOpen && (
+          <div className="custom-scroll min-h-0 max-h-[240px] overflow-y-auto border-t border-white/10">
+            {tracks.length === 0 ? (
+              <p className="px-3 py-6 text-center text-[11px] text-foreground/40">Плейлист пуст</p>
+            ) : (
+              tracks.map((tr, i) => {
+                const active = tr.id === currentTrackId
+                return (
+                  <button
+                    key={tr.id}
+                    type="button"
+                    onClick={() => onSelectTrack(tr.id)}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/5",
+                      active && "bg-white/[0.07]"
+                    )}
+                  >
+                    <span className="w-4 shrink-0 text-right text-[9px] tabular-nums text-foreground/30">
+                      {i + 1}
+                    </span>
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 rounded-full"
+                      style={{
+                        backgroundColor: active ? accentFrom : "rgba(255,255,255,0.18)",
+                      }}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{tr.title}</span>
+                    <span className="min-w-0 max-w-[92px] shrink-0 truncate text-[10px] text-foreground/40">
+                      {tr.artist}
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-foreground/35">
+                      {formatTime(tr.duration)}
+                    </span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function EqualizerIcon() {
