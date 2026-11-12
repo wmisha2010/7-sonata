@@ -658,7 +658,10 @@ export function MusicPlayer() {
         const now = Date.now()
         const prev = titleBarClickRef.current
         if (prev && now - prev.time < 350 && Math.abs(prev.x - startX) < 5 && Math.abs(prev.y - startY) < 5) {
-          windowAction("maximize")
+          // In compact (shade) mode the analogous "expand" action is leaving
+          // the shade; otherwise toggle full-screen maximize.
+          if (compact) exitCompact()
+          else windowAction("maximize")
           titleBarClickRef.current = null
         } else {
           titleBarClickRef.current = { time: now, x: startX, y: startY }
@@ -669,7 +672,7 @@ export function MusicPlayer() {
     window.addEventListener("mouseup", onUp)
     window.addEventListener("mouseleave", onLeave)
     window.addEventListener("blur", onLeave)
-  }, [windowAction])
+  }, [windowAction, compact, exitCompact])
   useEffect(() => {
     if (!compact) return
     const onKey = (e: KeyboardEvent) => {
