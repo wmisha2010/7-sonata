@@ -15,4 +15,6 @@ contextBridge.exposeInMainWorld("sonata", {
   setMiniSize: (height) => ipcRenderer.invoke("sonata:mini-size", Number(height) || 0),
   getMiniMode: () => ipcRenderer.invoke("sonata:mini-state"),
   windowAction: (action) => ipcRenderer.invoke("sonata:window", String(action)),
+  startDrag: (offsetX, offsetY) => ipcRenderer.invoke("sonata:drag-start", Number(offsetX) || 0, Number(offsetY) || 0),
+  endDrag: () => ipcRenderer.invoke("sonata:drag-end"),
 })

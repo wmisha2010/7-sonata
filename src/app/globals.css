@@ -190,9 +190,11 @@ body.sonata-transparent-shell {
   scrollbar-color: var(--muted-foreground) transparent;
 }
 
-/* Frameless Electron window: drag regions (see the custom title bar). */
+/* Frameless Electron window: the title bar is dragged by hand now (see
+   handleTitleBarMouseDown in music-player.tsx) so that a double-click on it
+   can maximize the window — the native drag region swallows that event. */
 .app-drag {
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 .app-drag button,
 .app-drag input,

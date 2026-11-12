@@ -150,6 +150,8 @@ interface SonataDesktopApi {
   getMiniMode?: () => Promise<boolean> | void
   setMiniSize?: (height: number) => Promise<boolean> | void
   windowAction?: (action: "minimize" | "maximize" | "tray" | "close") => Promise<boolean> | void
+  startDrag?: (offsetX: number, offsetY: number) => Promise<boolean> | void
+  endDrag?: () => Promise<boolean> | void
 }
 
 function desktopApi(): SonataDesktopApi | undefined {
@@ -217,6 +219,9 @@ export function MusicPlayer() {
   const [compact, setCompact] = useState(false)
   // Playlist drawer inside the compact bar.
   const [compactPlaylist, setCompactPlaylist] = useState(false)
+  // Tracks the last title-bar click so a quick second click maximizes the
+  // window instead of being treated as a new drag.
+  const titleBarClickRef = useRef<{ time: number; x: number; y: number } | null>(null)
   // Shade background opacity — how much of the desktop shows through the bar.
   const [compactOpacity, setCompactOpacity] = useState(DEFAULT_COMPACT_OPACITY)
   // The Electron window runs frameless (no OS title bar), so the app draws its
@@ -604,6 +609,42 @@ export function MusicPlayer() {
   const windowAction = useCallback((action: "minimize" | "maximize" | "tray" | "close") => {
     void desktopApi()?.windowAction?.(action)
   }, [])
+  // Frameless shell: the title bar is dragged by hand (the native drag region
+  // swallows the double-click, so we cannot maximize on a double-click there).
+  // A click without movement is a candidate double-click -> maximize.
+  const handleTitleBarMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    if ((e.target as HTMLElement).closest(".app-no-drag")) return
+    const api = desktopApi()
+    if (!api?.startDrag) return
+    const startX = e.clientX
+    const startY = e.clientY
+    let dragging = false
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging && (Math.abs(ev.clientX - startX) > 3 || Math.abs(ev.clientY - startY) > 3)) {
+        dragging = true
+        void api.startDrag?.(startX, startY)
+      }
+    }
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+      if (dragging) {
+        void api.endDrag?.()
+      } else {
+        const now = Date.now()
+        const prev = titleBarClickRef.current
+        if (prev && now - prev.time < 350 && Math.abs(prev.x - startX) < 5 && Math.abs(prev.y - startY) < 5) {
+          windowAction("maximize")
+          titleBarClickRef.current = null
+        } else {
+          titleBarClickRef.current = { time: now, x: startX, y: startY }
+        }
+      }
+    }
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+  }, [windowAction])
   useEffect(() => {
     if (!compact) return
     const onKey = (e: KeyboardEvent) => {
@@ -2477,7 +2518,7 @@ export function MusicPlayer() {
           its own slim one (drag area + window buttons). Not rendered in a
           normal browser. */}
       {framelessShell && !compact && (
-        <div className="app-drag relative z-20 flex h-8 shrink-0 items-center justify-between border-b border-border/50 bg-background/70 pl-3 pr-1 backdrop-blur-xl">
+        <div className="app-drag relative z-20 flex h-8 shrink-0 items-center justify-between border-b border-border/50 bg-background/70 pl-3 pr-1 backdrop-blur-xl" onMouseDown={handleTitleBarMouseDown}>
           <div className="flex items-center gap-2">
             <Disc3 className="h-3 w-3 text-violet-500 dark:text-emerald-400" />
             <span className="text-[11px] font-semibold text-foreground/90">7-Sonata</span>
@@ -3431,6 +3472,7 @@ export function MusicPlayer() {
           onCycleRepeat={() => setRepeatMode((m) => (m === "off" ? "all" : m === "all" ? "one" : "off"))}
           opacity={compactOpacity}
           onOpacityChange={setCompactOpacity}
+          onTitleBarMouseDown={handleTitleBarMouseDown}
           onExpand={exitCompact}
           onHideToTray={() => windowAction("tray")}
           onClose={() => {
@@ -3612,6 +3654,7 @@ function CompactPlayer({
   onClose,
   opacity,
   onOpacityChange,
+  onTitleBarMouseDown,
 }: {
   track: Track | null
   playing: boolean
@@ -3646,6 +3689,8 @@ function CompactPlayer({
   /** Background opacity of the shade (0.3 … 1), persisted by the parent. */
   opacity: number
   onOpacityChange: (value: number) => void
+  /** Custom drag for the frameless shell — see handleTitleBarMouseDown. */
+  onTitleBarMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void
 }) {
   const [opacityOpen, setOpacityOpen] = useState(false)
   const pct = duration > 0 ? Math.min(100, Math.max(0, (progress / duration) * 100)) : 0
@@ -3741,7 +3786,7 @@ function CompactPlayer({
         />
         {/* Title bar — drag area; window buttons keep working because the
             Electron window is frameless. */}
-        <div className="app-drag flex h-[26px] shrink-0 items-center justify-between border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent pl-2.5 pr-1">
+        <div className="app-drag flex h-[26px] shrink-0 items-center justify-between border-b border-white/10 bg-gradient-to-b from-white/[0.08] to-transparent pl-2.5 pr-1" onMouseDown={onTitleBarMouseDown}>
           <div className="flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accentFrom }} />
             <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-white/70">

@@ -6,7 +6,7 @@
 // ELECTRON_RUN_AS_NODE) and open it in a native window. This way every app
 // feature — MP3mn search, Rutube video proxy, quality selector, downloads —
 // works locally with no hosted backend.
-const { app, BrowserWindow, shell, dialog, ipcMain, Tray, Menu, nativeImage } = require("electron")
+const { app, BrowserWindow, shell, dialog, ipcMain, Tray, Menu, nativeImage, screen } = require("electron")
 const { spawn } = require("node:child_process")
 const path = require("node:path")
 const fs = require("node:fs")
@@ -273,6 +273,28 @@ function applyMiniWindow(win, on) {
     savedFullBounds = null
   }
 }
+
+let dragOffset = null
+let dragTimer = null
+ipcMain.handle("sonata:drag-start", (_event, ox, oy) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  dragOffset = { x: Number(ox) || 0, y: Number(oy) || 0 }
+  if (dragTimer) clearInterval(dragTimer)
+  dragTimer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !dragOffset) {
+      if (dragTimer) { clearInterval(dragTimer); dragTimer = null }
+      return
+    }
+    const pt = screen.getCursorScreenPoint()
+    mainWindow.setPosition(Math.round(pt.x - dragOffset.x), Math.round(pt.y - dragOffset.y))
+  }, 16)
+  return true
+})
+ipcMain.handle("sonata:drag-end", () => {
+  dragOffset = null
+  if (dragTimer) { clearInterval(dragTimer); dragTimer = null }
+  return true
+})
 
 ipcMain.handle("sonata:window", (event, action) => {
   const win = BrowserWindow.fromWebContents(event.sender)
