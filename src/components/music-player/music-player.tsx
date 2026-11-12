@@ -462,7 +462,10 @@ export function MusicPlayer() {
     const api = desktopApi()
     const done = (mini?: boolean) => {
       if (cancelled) return
-      if (mini) setCompact(true)
+      // The desktop shell decides: a stored `true` in localStorage must not
+      // resurrect the shade when the window was opened expanded (and the other
+      // way round) — that flipped the window a quarter second after startup.
+      if (typeof mini === "boolean") setCompact(mini)
       setUiReady(true)
     }
     if (api?.framelessShell && typeof api.getMiniMode === "function") {

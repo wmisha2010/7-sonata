@@ -291,6 +291,7 @@ ipcMain.handle("sonata:mini-size", (event, height) => {
   const h = Math.max(MINI_MIN_HEIGHT, Math.min(900, Math.round(Number(height) || 0)))
   const b = win.getBounds()
   if (b.width !== MINI_WIDTH || b.height !== h) {
+    log(`mini-size: ${b.width}x${b.height} -> ${MINI_WIDTH}x${h}${h > MINI_HEIGHT ? " (playlist open)" : ""}`)
     win.setBounds({ x: b.x, y: b.y, width: MINI_WIDTH, height: h })
   }
   return true
@@ -386,10 +387,9 @@ async function createWindow() {
   })
 
   mainWindow.once("ready-to-show", () => {
-    if (miniMode) {
-      mainWindow.setAlwaysOnTop(true, "floating")
-      log(`started in compact mode (${MINI_WIDTH}x${mainWindow.getBounds().height})`)
-    }
+    if (miniMode) mainWindow.setAlwaysOnTop(true, "floating")
+    const b = mainWindow.getBounds()
+    log(`window ready: ${miniMode ? "shade" : "full"} ${b.width}x${b.height}`)
     mainWindow.show()
   })
 
