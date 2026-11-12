@@ -203,6 +203,7 @@ const FULL_MIN_WIDTH = 1000
 const FULL_MIN_HEIGHT = 640
 
 let savedFullBounds = null // window rect to come back to
+let savedMiniPos = null // where the shade bar sat
 let miniMode = false
 
 function windowStatePath() {
@@ -240,12 +241,31 @@ function persistWindowState() {
     if (!miniMode && win && !win.isMaximized() && !win.isFullScreen()) {
       savedFullBounds = win.getBounds()
     }
-    // Only the mode and the full-size rect are remembered. The shade always
-    // reopens at its base height: the playlist drawer is runtime state, and
-    // restoring it made the window start tall and then shrink.
-    writeWindowState({ mini: miniMode, fullBounds: savedFullBounds })
+    if (miniMode && win) {
+      const b = win.getBounds()
+      savedMiniPos = { x: b.x, y: b.y }
+    }
+    // Only the mode and the rectangles are remembered. The shade always reopens
+    // at its base height: the playlist drawer is runtime state, and restoring it
+    // made the window start tall and then shrink. Its position is kept, so the
+    // bar comes back where the user left it instead of in the middle.
+    writeWindowState({ mini: miniMode, fullBounds: savedFullBounds, miniPos: savedMiniPos })
   } catch {
     /* ignore */
+  }
+}
+
+// A remembered shade position can belong to a monitor that is no longer there;
+// keep the bar inside the work area of whatever display it lands on.
+function clampToWorkArea(x, y, width, height) {
+  try {
+    const area = screen.getDisplayMatching({ x, y, width, height }).workArea
+    return {
+      x: Math.min(Math.max(x, area.x), area.x + area.width - width),
+      y: Math.min(Math.max(y, area.y), area.y + area.height - height),
+    }
+  } catch {
+    return { x, y }
   }
 }
 
@@ -456,10 +476,11 @@ function maybeShowWindow() {
   mainWindow.focus()
 }
 
-ipcMain.on("sonata:renderer-ready", () => {
+ipcMain.on("sonata:renderer-ready", (_event, info) => {
   if (rendererReady) return
   rendererReady = true
-  log("renderer ready: library restored")
+  const detail = info && info.reason ? ` (${info.reason} in ${info.ms} ms, ${info.frames} frames)` : ""
+  log(`renderer ready: library restored${detail}`)
   maybeShowWindow()
 })
 
@@ -499,11 +520,21 @@ async function createWindow() {
   const savedState = readWindowState()
   miniMode = savedState.mini === true
   savedFullBounds = savedState.fullBounds && typeof savedState.fullBounds === "object" ? savedState.fullBounds : null
+  const savedPos = savedState.miniPos
+  savedMiniPos =
+    savedPos && Number.isFinite(savedPos.x) && Number.isFinite(savedPos.y) ? { x: savedPos.x, y: savedPos.y } : null
+  const miniAt = miniMode && savedMiniPos ? clampToWorkArea(savedMiniPos.x, savedMiniPos.y, MINI_WIDTH, MINI_HEIGHT) : null
 
   mainWindow = new BrowserWindow({
     width: miniMode ? MINI_WIDTH : savedFullBounds?.width || 1280,
     height: miniMode ? MINI_HEIGHT : savedFullBounds?.height || 832,
-    ...(miniMode || !savedFullBounds ? {} : { x: savedFullBounds.x, y: savedFullBounds.y }),
+    ...(miniMode
+      ? miniAt
+        ? { x: miniAt.x, y: miniAt.y }
+        : {}
+      : savedFullBounds
+        ? { x: savedFullBounds.x, y: savedFullBounds.y }
+        : {}),
     minWidth: miniMode ? MINI_MIN_WIDTH : FULL_MIN_WIDTH,
     minHeight: miniMode ? MINI_MIN_HEIGHT : FULL_MIN_HEIGHT,
     // A shade launch is a small, fixed, always-on-top bar from the first frame.

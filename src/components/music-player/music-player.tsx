@@ -152,7 +152,7 @@ interface SonataDesktopApi {
   windowAction?: (action: "minimize" | "maximize" | "tray" | "close") => Promise<boolean> | void
   startDrag?: (offsetX: number, offsetY: number) => Promise<boolean> | void
   endDrag?: () => Promise<boolean> | void
-  appReady?: () => void
+  appReady?: (info?: { reason: string; ms: number; frames: number }) => void
   onVisibility?: (cb: (visible: boolean) => void) => () => void
 }
 
@@ -514,6 +514,12 @@ export function MusicPlayer() {
   // any earlier presents the previous (splash) frame. So report only once frame
   // pacing is back to normal — two short consecutive frames — with a hard cap so
   // a permanently slow frame can never keep the window hidden.
+  //
+  // Measured on a software-rendered machine: rAF in the still-hidden window ticks
+  // only every ~0.7–0.9 s, so the two-short-frame branch never fires and the cap
+  // is what actually shows the window. The cap cannot go much lower: at 500 ms
+  // the window opened on the splash ("Загрузка библиотеки…") for ~0.5 s before
+  // the player frame landed.
   useEffect(() => {
     if (!tracksReady || !uiReady) return
     const api = desktopApi()
@@ -522,14 +528,19 @@ export function MusicPlayer() {
     let raf = 0
     let last = 0
     let quick = 0
+    let frames = 0
     const started = performance.now()
     const tick = (now: number) => {
       if (cancelled) return
+      frames += 1
       if (last && now - last < 45) quick += 1
       else quick = 0
       last = now
-      if (quick >= 2 || now - started > 1200) {
-        api.appReady?.()
+      const capped = now - started > 1200
+      if (quick >= 2 || capped) {
+        // The reason goes to the desktop log: it is what decides whether the
+        // window appears on a fast frame or only on the safety cap.
+        api.appReady?.({ reason: quick >= 2 ? "quick" : "cap", ms: Math.round(now - started), frames })
         return
       }
       raf = requestAnimationFrame(tick)

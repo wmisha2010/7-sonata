@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld("sonata", {
   endDrag: () => ipcRenderer.invoke("sonata:drag-end"),
   // First full frame: library restored and the window mode is known. The main
   // process keeps the window hidden until this arrives (no splash flash).
-  appReady: () => ipcRenderer.send("sonata:renderer-ready"),
+  appReady: (info) => ipcRenderer.send("sonata:renderer-ready", info || null),
   // Window shown/hidden/minimized — lets decorative animation loops park when
   // the player is in the tray or minimized (occlusion tracking is off).
   onVisibility: (cb) => {
