@@ -479,7 +479,7 @@ function maybeShowWindow() {
 ipcMain.on("sonata:renderer-ready", (_event, info) => {
   if (rendererReady) return
   rendererReady = true
-  const detail = info && info.reason ? ` (${info.reason} in ${info.ms} ms, ${info.frames} frames)` : ""
+  const detail = info && info.reason ? ` (${info.reason} in ${info.ms} ms, ${info.theme || "?"})` : ""
   log(`renderer ready: library restored${detail}`)
   maybeShowWindow()
 })
@@ -558,6 +558,12 @@ async function createWindow() {
       sandbox: true,
       // The only bridge to the renderer: the compact "windowshade" mode.
       preload: path.join(__dirname, "preload.cjs"),
+      // A hidden window is painted on demand only about once per second, and
+      // whatever it painted last is what the user sees the moment it opens.
+      // Not painting while hidden means the splash is never drawn: the first
+      // frame after `show()` is the player itself, so the window can open as
+      // soon as the renderer reports its commit (see `sonata:renderer-ready`).
+      paintWhenInitiallyHidden: false,
       // No timer/rAF throttling when the window is hidden or minimized —
       // progress bars, HLS and PiP video must keep running in the background.
       backgroundThrottling: false,

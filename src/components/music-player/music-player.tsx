@@ -152,7 +152,7 @@ interface SonataDesktopApi {
   windowAction?: (action: "minimize" | "maximize" | "tray" | "close") => Promise<boolean> | void
   startDrag?: (offsetX: number, offsetY: number) => Promise<boolean> | void
   endDrag?: () => Promise<boolean> | void
-  appReady?: (info?: { reason: string; ms: number; frames: number }) => void
+  appReady?: (info?: { reason: string; ms: number; theme: string }) => void
   onVisibility?: (cb: (visible: boolean) => void) => () => void
 }
 
@@ -165,6 +165,70 @@ const shellVisibility = { visible: true }
 function desktopApi(): SonataDesktopApi | undefined {
   if (typeof window === "undefined") return undefined
   return (window as unknown as { sonata?: SonataDesktopApi }).sonata
+}
+
+// The ambient layer is the current cover, blurred and stretched over the whole
+// window. Blurring it in CSS meant a ~90 px gaussian over every window pixel,
+// and on a machine without GPU acceleration that alone was most of the ~0.9 s
+// the first player frame took to raster. Drawing the cover into a tiny canvas
+// once and letting the browser scale that canvas gives the same soft wash for a
+// few thousand pixels of work.
+function AmbientBackdrop({
+  src,
+  opacity,
+  width = 96,
+  height = 62,
+  blur = 4,
+  onPainted,
+}: {
+  src: string
+  opacity: number
+  width?: number
+  height?: number
+  blur?: number
+  onPainted?: () => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const paintedRef = useRef(onPainted)
+  paintedRef.current = onPainted
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!canvas || !ctx) return
+    canvas.width = width
+    canvas.height = height
+    let cancelled = false
+    const draw = (img: HTMLImageElement) => {
+      if (cancelled) return
+      // Same framing as background-size: cover.
+      const scale = Math.max(width / img.naturalWidth, height / img.naturalHeight)
+      const w = img.naturalWidth * scale
+      const h = img.naturalHeight * scale
+      ctx.clearRect(0, 0, width, height)
+      ctx.filter = `blur(${blur}px) saturate(1.6) brightness(1.1)`
+      ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h)
+      ctx.filter = "none"
+      paintedRef.current?.()
+    }
+    const img = new Image()
+    img.onload = () => draw(img)
+    // A cover that never arrives must not hold the window back either.
+    img.onerror = () => paintedRef.current?.()
+    img.src = src
+    // Already-cached covers arrive complete, without firing onload again.
+    if (img.complete && img.naturalWidth > 0) draw(img)
+    return () => {
+      cancelled = true
+    }
+  }, [src, width, height, blur])
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden
+      className="pointer-events-none block h-full w-full"
+      style={{ opacity, transition: "opacity 400ms ease" }}
+    />
+  )
 }
 
 export function MusicPlayer() {
@@ -447,10 +511,21 @@ export function MusicPlayer() {
   // on every reload. They are read in an effect (not in the state initializer)
   // so the server-rendered markup and the first client render still match.
   const settingsFirstSaveRef = useRef(true)
+  // The window is shown as soon as the library is restored, which can be before
+  // React has applied the stored theme — the first frames then came up in the
+  // default dark palette and faded into the light one. The gate below waits for
+  // this flag, so the very first visible frame already has the right theme.
+  const [settingsReady, setSettingsReady] = useState(false)
+  // The ambient cover is the window's background; showing the window before it
+  // has been drawn puts up a half-empty first frame for a moment.
+  const [backdropPainted, setBackdropPainted] = useState(false)
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(SETTINGS_KEY)
-      if (!raw) return
+      if (!raw) {
+        setSettingsReady(true)
+        return
+      }
       const s = JSON.parse(raw) as Partial<PersistedSettings>
       if (s.theme === "light" || s.theme === "dark") setTheme(s.theme)
       if (typeof s.volume === "number" && Number.isFinite(s.volume))
@@ -476,6 +551,7 @@ export function MusicPlayer() {
     } catch {
       /* unreadable/corrupt entry — keep the defaults */
     }
+    setSettingsReady(true)
   }, [])
 
   // Electron owns the window mode: the main process opened the window in the
@@ -509,48 +585,47 @@ export function MusicPlayer() {
   // library is restored and the window mode is known. Report that first full
   // frame, so the user never sees the "Загрузка библиотеки…" splash.
   //
-  // The splash unmounts in this commit, but the player layer is heavy: without
-  // GPU acceleration its first raster takes a few hundred ms, and a window shown
-  // any earlier presents the previous (splash) frame. So report only once frame
-  // pacing is back to normal — two short consecutive frames — with a hard cap so
-  // a permanently slow frame can never keep the window hidden.
+  // The splash unmounts in this commit, but the frame that replaces it does not
+  // exist yet: a hidden window is painted on demand only about once per second
+  // (measured here: rAF gaps of 50/1050/1000/450 ms while the window is hidden,
+  // 17 ms once it is shown), so waiting for frames in the renderer is what kept
+  // the window off screen for ~1.8 s.
   //
-  // Measured on a software-rendered machine: rAF in the still-hidden window ticks
-  // only every ~0.7–0.9 s, so the two-short-frame branch never fires and the cap
-  // is what actually shows the window. The cap cannot go much lower: at 500 ms
-  // the window opened on the splash ("Загрузка библиотеки…") for ~0.5 s before
-  // the player frame landed.
+  // The full player is painted on first show anyway (the window is big and
+  // nothing but the player is ever behind it), so it is reported at once and
+  // the window opens ~200 ms after the first paint. The shade, on the other
+  // hand, would present the splash frame the compositor painted last, so it
+  // waits for two real frames — the bar itself — with a hard cap.
   useEffect(() => {
-    if (!tracksReady || !uiReady) return
+    if (!tracksReady || !uiReady || !settingsReady) return
     const api = desktopApi()
     if (!api?.appReady) return
-    let cancelled = false
-    let raf = 0
-    let last = 0
-    let quick = 0
+    const theme = () => (document.documentElement.classList.contains("dark") ? "dark" : "light")
+    if (!compact) {
+      api.appReady({ reason: "commit", ms: 0, theme: theme() })
+      return
+    }
+    const startedAt = performance.now()
     let frames = 0
-    const started = performance.now()
-    const tick = (now: number) => {
-      if (cancelled) return
+    let raf = 0
+    let timer = 0
+    const stop = (reason: string) => {
+      cancelAnimationFrame(raf)
+      clearTimeout(timer)
+      api.appReady?.({ reason, ms: Math.round(performance.now() - startedAt), theme: theme() })
+    }
+    const tick = () => {
       frames += 1
-      if (last && now - last < 45) quick += 1
-      else quick = 0
-      last = now
-      const capped = now - started > 1200
-      if (quick >= 2 || capped) {
-        // The reason goes to the desktop log: it is what decides whether the
-        // window appears on a fast frame or only on the safety cap.
-        api.appReady?.({ reason: quick >= 2 ? "quick" : "cap", ms: Math.round(now - started), frames })
-        return
-      }
-      raf = requestAnimationFrame(tick)
+      if (frames >= 2) stop("painted")
+      else raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
+    timer = window.setTimeout(() => stop("painted-timeout"), 1400)
     return () => {
-      cancelled = true
       cancelAnimationFrame(raf)
+      clearTimeout(timer)
     }
-  }, [tracksReady, uiReady])
+  }, [tracksReady, uiReady, settingsReady, compact])
 
   // Track whether the shell actually shows the window (tray / minimized).
   useEffect(() => {
@@ -2714,7 +2789,24 @@ export function MusicPlayer() {
 
       {/* Ambient blurred cover image */}
       {currentTrack?.coverImage && (
-        <div aria-hidden className="pointer-events-none fixed inset-0 z-0 overflow-hidden" style={{ backgroundImage: `url(${currentTrack.coverImage})`, backgroundSize: "cover", backgroundPosition: "center", filter: "blur(90px) saturate(1.6) brightness(1.1)", transform: "scale(1.4)", opacity: theme === "dark" ? 0.5 : 0.3, transition: "background-image 600ms ease, opacity 400ms ease" }} />
+        <div aria-hidden className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+          {/* The blurred cover is a remote image: until it has been drawn, the
+              window is already up, so stand in for it with the track's own
+              colours — instant, and gone as soon as the real wash arrives. */}
+          <div
+            aria-hidden
+            className="absolute inset-0 transition-opacity duration-300"
+            style={{
+              background: `linear-gradient(135deg, ${currentTrack.cover.from}, ${currentTrack.cover.to})`,
+              opacity: backdropPainted ? 0 : theme === "dark" ? 0.5 : 0.3,
+            }}
+          />
+          <AmbientBackdrop
+            src={currentTrack.coverImage}
+            opacity={theme === "dark" ? 0.5 : 0.3}
+            onPainted={() => setBackdropPainted(true)}
+          />
+        </div>
       )}
       {currentTrack && (
         <div aria-hidden className="pointer-events-none fixed inset-0 z-0" style={{ background: `linear-gradient(180deg, transparent 0%, ${currentTrack.cover.from}${theme === "dark" ? "22" : "15"} 100%), radial-gradient(circle at 50% 50%, transparent 30%, ${theme === "dark" ? "#00000066" : "#ffffff33"} 100%)`, transition: "background 600ms ease" }} />
@@ -2807,7 +2899,7 @@ export function MusicPlayer() {
         >
           <div ref={playerCardRef}
                className={cn(
-            "relative overflow-hidden bg-card/60 shadow-2xl backdrop-blur-2xl",
+            "relative overflow-hidden bg-card/60 shadow-2xl",
             currentTrack?.isVideo
               ? "rounded-none border-0 p-0 sm:rounded-3xl sm:border sm:border-border sm:p-8"
               : "rounded-3xl border border-border/50 p-5 sm:p-8"
@@ -3911,18 +4003,15 @@ function CompactPlayer({
         {/* Same colour treatment as the full player: the cover, blurred,
             washed with the track's gradient. */}
         {track?.coverImage && (
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 -z-10 opacity-35"
-            style={{
-              backgroundImage: `url(${track.coverImage})`,
-              backgroundSize: "cover",
-              backgroundPosition: "center",
-              filter: "blur(26px) saturate(1.6)",
-              transform: "scale(1.4)",
-              opacity: 0.35 * Math.min(1, opacity / DEFAULT_COMPACT_OPACITY),
-            }}
-          />
+          <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
+            <AmbientBackdrop
+              src={track.coverImage}
+              opacity={0.35 * Math.min(1, opacity / DEFAULT_COMPACT_OPACITY)}
+              width={90}
+              height={34}
+              blur={2}
+            />
+          </div>
         )}
         <div
           aria-hidden
