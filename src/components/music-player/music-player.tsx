@@ -244,6 +244,12 @@ export function MusicPlayer() {
   const [repeatMode, setRepeatMode] = useState<RepeatMode>("off")
   const [isLoading, setIsLoading] = useState(false)
   const [tracksReady, setTracksReady] = useState(false)
+  // `mounted` is false during SSR and on the first client render, so the
+  // "Загрузка библиотеки…" splash is never part of the server HTML: the
+  // hidden window's first (and only) paint while hidden is the player shell,
+  // not the splash, and the window can be shown the moment the library is
+  // restored instead of waiting for a compositor frame.
+  const [mounted, setMounted] = useState(false)
   const [theme, setTheme] = useState<Theme>("dark")
   const [isDragOver, setIsDragOver] = useState(false)
   // ---- Search ----
@@ -585,47 +591,22 @@ export function MusicPlayer() {
   // library is restored and the window mode is known. Report that first full
   // frame, so the user never sees the "Загрузка библиотеки…" splash.
   //
-  // The splash unmounts in this commit, but the frame that replaces it does not
-  // exist yet: a hidden window is painted on demand only about once per second
-  // (measured here: rAF gaps of 50/1050/1000/450 ms while the window is hidden,
-  // 17 ms once it is shown), so waiting for frames in the renderer is what kept
-  // the window off screen for ~1.8 s.
-  //
-  // The full player is painted on first show anyway (the window is big and
-  // nothing but the player is ever behind it), so it is reported at once and
-  // the window opens ~200 ms after the first paint. The shade, on the other
-  // hand, would present the splash frame the compositor painted last, so it
-  // waits for two real frames — the bar itself — with a hard cap.
+  useEffect(() => setMounted(true), [])
+
+  // The library is restored and the window mode is known — report it so the
+  // desktop shell can show the window. Because the splash is no longer in the
+  // server HTML, the first (and only) frame painted while hidden is the player
+  // shell, so there is nothing to wait for.
   useEffect(() => {
     if (!tracksReady || !uiReady || !settingsReady) return
     const api = desktopApi()
     if (!api?.appReady) return
-    const theme = () => (document.documentElement.classList.contains("dark") ? "dark" : "light")
-    if (!compact) {
-      api.appReady({ reason: "commit", ms: 0, theme: theme() })
-      return
-    }
-    const startedAt = performance.now()
-    let frames = 0
-    let raf = 0
-    let timer = 0
-    const stop = (reason: string) => {
-      cancelAnimationFrame(raf)
-      clearTimeout(timer)
-      api.appReady?.({ reason, ms: Math.round(performance.now() - startedAt), theme: theme() })
-    }
-    const tick = () => {
-      frames += 1
-      if (frames >= 2) stop("painted")
-      else raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    timer = window.setTimeout(() => stop("painted-timeout"), 1400)
-    return () => {
-      cancelAnimationFrame(raf)
-      clearTimeout(timer)
-    }
-  }, [tracksReady, uiReady, settingsReady, compact])
+    api.appReady({
+      reason: "commit",
+      ms: 0,
+      theme: document.documentElement.classList.contains("dark") ? "dark" : "light",
+    })
+  }, [tracksReady, uiReady, settingsReady])
 
   // Track whether the shell actually shows the window (tray / minimized).
   useEffect(() => {
@@ -2813,7 +2794,7 @@ export function MusicPlayer() {
       )}
 
       {/* Loading splash while restoring the saved library */}
-      {(!tracksReady || !uiReady) && (
+      {mounted && (!tracksReady || !uiReady) && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-background">
           <Disc3 className="h-12 w-12 animate-spin-slow text-violet-500 dark:text-emerald-400" />
           <p className="text-xs text-muted-foreground">Загрузка библиотеки…</p>
