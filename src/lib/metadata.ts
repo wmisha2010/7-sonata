@@ -5,6 +5,7 @@ export interface ExtractedMeta {
   artist?: string
   album?: string
   coverImage?: string // data URL
+  duration?: number // seconds
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
@@ -33,11 +34,18 @@ export async function extractAudioMeta(file: File): Promise<ExtractedMeta> {
       const base64 = uint8ToBase64(picture.data)
       coverImage = `data:${picture.format || "image/jpeg"};base64,${base64}`
     }
+    const duration =
+      typeof metadata.format?.duration === "number" &&
+      Number.isFinite(metadata.format.duration) &&
+      metadata.format.duration > 0
+        ? Math.round(metadata.format.duration)
+        : undefined
     return {
       title: common.title?.trim() || undefined,
       artist: common.artist?.trim() || undefined,
       album: common.album?.trim() || undefined,
       coverImage,
+      duration,
     }
   } catch {
     return {}

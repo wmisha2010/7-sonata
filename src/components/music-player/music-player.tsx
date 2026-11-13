@@ -659,11 +659,31 @@ export function MusicPlayer() {
     if (typeof document === "undefined" || document.pictureInPictureElement) return
     const el = pipTarget()
     if (!el || typeof el.requestPictureInPicture !== "function") return
-    try {
-      const p = el.requestPictureInPicture()
-      if (p && typeof p.catch === "function") p.catch(() => {})
-    } catch {
-      /* unsupported / no user activation — the audio keeps playing */
+    const attempt = () => {
+      if (typeof document === "undefined" || document.pictureInPictureElement) return
+      const e = pipTarget()
+      if (!e || typeof e.requestPictureInPicture !== "function") return
+      try {
+        const p = e.requestPictureInPicture()
+        if (p && typeof p.catch === "function") p.catch(() => {})
+      } catch {
+        /* unsupported / no user activation — the audio keeps playing */
+      }
+    }
+    // Defer until the clip has metadata, otherwise the request can silently
+    // fail on a not-yet-loaded element.
+    const media = el as HTMLMediaElement
+    if (media.readyState >= 2) {
+      attempt()
+    } else {
+      const onReady = () => {
+        media.removeEventListener("loadedmetadata", onReady)
+        media.removeEventListener("canplay", onReady)
+        attempt()
+      }
+      media.addEventListener("loadedmetadata", onReady, { once: true })
+      media.addEventListener("canplay", onReady, { once: true })
+      window.setTimeout(attempt, 500)
     }
   }, [pipTarget])
   const exitCompactPip = useCallback(() => {
@@ -851,7 +871,16 @@ export function MusicPlayer() {
             const url = await getAudioUrl(s.id)
             if (url) {
               blobUrlsRef.current.add(url)
-              restored.push({ ...s, url, hasAudioBlob: undefined } as Track)
+              // Backfill duration for tracks stored before extraction existed.
+              let duration = s.duration
+              if ((!duration || duration <= 0) && url) {
+                try {
+                  duration = await getDurationFromAudio(url, !!s.isVideo)
+                } catch {
+                  duration = s.duration
+                }
+              }
+              restored.push({ ...s, url, duration: duration && duration > 0 ? duration : s.duration, hasAudioBlob: undefined } as Track)
             }
           }
         }
@@ -2001,6 +2030,7 @@ export function MusicPlayer() {
               album: album || next[idx].album,
               coverImage: coverImage || next[idx].coverImage,
               cover: coverColors,
+              duration: meta.duration && meta.duration > 0 ? meta.duration : next[idx].duration,
             }
             persistLibrary(next)
             return next
@@ -2418,12 +2448,16 @@ export function MusicPlayer() {
           // (edges) quieter. A gentle falloff keeps bars from matching.
           const weight = 1 - norm * 0.3 // center → 1.0, edges → 0.7
           target = Math.min(1, shaped * weight)
-        } else {
-          const active = playing ? 0.5 : 0.06
+        } else if (playing) {
+          const active = 0.5
           const centerBoost = 1 - norm * 0.5
           const wave =
             0.5 + 0.5 * Math.sin(t * 3 + i * 0.5) * Math.sin(t * 1.7 + i * 0.22)
           target = active * centerBoost * (0.2 + 0.8 * Math.max(0, wave))
+        } else {
+          // Player is off/paused: keep the spectrum flat so there are no
+          // stray spikes. (Peak-hold still decays below.)
+          target = 0
         }
         // Snappier dynamics: near-instant attack, medium release so bars
         // jump on transients (kick/snare) and ease down on sustain.
